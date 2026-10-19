@@ -447,7 +447,11 @@ test('the artifact preview permits iframe origins but preserves opaque credentia
   assert.equal(frame.status, 200)
   const html = await frame.text()
   assert.match(html, /setAttribute\('sandbox','allow-scripts'\)/)
-  assert.match(html, /url\.protocol==='https:'&&!url\.username&&!url\.password\)window\.open\(url\.href,'_blank','noopener,noreferrer'\)/)
+  // The design only asks to open a link; the wrapper passes the ask to the app on this
+  // origin, which shows the address and opens it on the user's own click.
+  assert.doesNotMatch(html, /window\.open/)
+  assert.match(html, /if\(event\.source!==frame\.contentWindow\|\|event\.data\?\.token!==token\)return;/)
+  assert.match(html, /parent\.postMessage\(\{type:'fx0-artifact-open',url:event\.data\.url\},location\.origin\)/)
   assert.match(html, /navigator\.userActivation\?\.isActive!==false/)
   assert.doesNotMatch(html, /allow-popups/)
   assert.match(html, /setAttribute\('credentialless',''\)/)

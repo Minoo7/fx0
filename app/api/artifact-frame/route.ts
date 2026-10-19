@@ -77,13 +77,11 @@ addEventListener('message',event=>{
   // The design paints in its own process, after this wrapper's load event; the app
   // swaps a new revision on screen only once it has.
   if(event.data.type==='painted')parent.postMessage({type:'fx0-artifact-painted'},location.origin);
-  // The design cannot open popups itself; a clicked https link is opened here, without
-  // an opener, and only during the click's user activation (it propagates to this frame).
+  // The design can only ask to open a link: its scripts can read the token and send
+  // this at any time. The app shows the address and opens it on the user's own click
+  // there. Recent user activation only filters out asks nobody prompted; it is not proof.
   if(event.data.type==='open'&&typeof event.data.url==='string'&&navigator.userActivation?.isActive!==false){
-    try{
-      const url=new URL(event.data.url);
-      if(url.protocol==='https:'&&!url.username&&!url.password)window.open(url.href,'_blank','noopener,noreferrer');
-    }catch{}
+    parent.postMessage({type:'fx0-artifact-open',url:event.data.url},location.origin);
   }
 });
 frame.addEventListener('load',()=>setTimeout(()=>{

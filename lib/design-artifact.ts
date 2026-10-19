@@ -18,8 +18,9 @@ export const DESIGN_ARTIFACT_EMBEDDED_CSP = [
 ].join('; ')
 
 function designArtifactBootstrap(readyToken?: string): string {
-  // The sandbox grants no popups, so a clicked https link asks the trusted wrapper to
-  // open it (see app/api/artifact-frame) instead of navigating the preview away.
+  // The sandbox grants no popups, so a clicked https link asks the app to open it
+  // (see app/api/artifact-frame): the app shows the address and opens it only on the
+  // user's own click there, instead of the design navigating the preview away.
   const heartbeat = readyToken
     ? `const token=${JSON.stringify(readyToken)};const send=type=>parent.postMessage({type,token},"*");send("heartbeat");setInterval(()=>send("heartbeat"),500);addEventListener("load",()=>{send("ready");requestAnimationFrame(()=>requestAnimationFrame(()=>send("painted")))},{once:true});addEventListener("click",event=>{const link=event.target instanceof Element&&event.target.closest("a[href]");const url=link?link.getAttribute("href")||"":"";if(/^https:/i.test(url)){event.preventDefault();parent.postMessage({type:"open",token,url},"*")}},true);`
     : ''

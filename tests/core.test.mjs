@@ -21,6 +21,25 @@ import {
 } from '../components/chat-state.ts'
 import { createTools } from '../lib/tools.ts'
 import { featuredModels } from '../lib/featured-models.ts'
+import { designLinkUrl, MAX_DESIGN_LINK_LENGTH } from '../lib/design-link.ts'
+
+test('a design may only ask to open a whole https address, shown in full before it opens', () => {
+  assert.equal(designLinkUrl('https://vercel.com/blog?ref=design#top'), 'https://vercel.com/blog?ref=design#top')
+  assert.equal(designLinkUrl('https://EXAMPLE.com'), 'https://example.com/', 'the dialog shows the address the browser opens')
+  for (const value of [
+    'http://example.com', 'javascript:alert(1)', 'data:text/html,hi', 'https://user:secret@example.com',
+    'https://user@example.com', '//example.com', 'not a url', '', null, undefined, 42, { href: 'https://example.com' },
+  ]) {
+    assert.equal(designLinkUrl(value), null, JSON.stringify(value) ?? String(value))
+  }
+  const longest = `https://example.com/?q=${'a'.repeat(MAX_DESIGN_LINK_LENGTH - 'https://example.com/?q='.length)}`
+  assert.equal(designLinkUrl(longest), longest)
+  assert.equal(designLinkUrl(`${longest}a`), null, 'too long to show whole')
+  // An address that only grows past the limit once the browser encodes it is refused too.
+  const spaced = `https://example.com/?q=a${' '.repeat(1000)}b`
+  assert.ok(spaced.length <= MAX_DESIGN_LINK_LENGTH && new URL(spaced).href.length > MAX_DESIGN_LINK_LENGTH)
+  assert.equal(designLinkUrl(spaced), null)
+})
 import { readFileSync } from 'node:fs'
 import { DESIGN_MD_CATALOG, DESIGN_MD_MAX_BYTES, parseDesignMdRequest } from '../lib/design-md.ts'
 
