@@ -184,7 +184,7 @@ test('a trial guest sends without sign-in or draft reservation and updates the r
   const composer = find(app.tree(), (node) => node.type === Composer)
   composer.props.onDraftInput('Make a design')
   assert.equal(find(app.tree(), (node) => node.type === Sidebar).props.user, null, 'a trial identity is not an OAuth account')
-  assert.equal(find(app.composerTree(), (node) => node.props?.['aria-label'] === 'Model: Opus 5.5 Fast').props.disabled, true)
+  assert.equal(find(app.composerTree(), (node) => /^Model: claude-opus-5\.5/.test(node.props?.['aria-label'] ?? '')).props.disabled, true)
   assert.equal(find(app.composerTree(), (node) => node.props?.['aria-label'] === 'reasoning effort: high'), null)
   assert.deepEqual(app.handle().getGeneration(), { model: trialModel, effort: 'low', fast: true, defaultModel: 'default-model' })
   app.handle().restoreDraft(draft)

@@ -690,7 +690,10 @@ export default function Composer({
   const intrinsicFast = Boolean(fastBase) && (models.length === 0 || models.includes(fastBase))
   const resolvedModel = intrinsicFast ? fastBase : pickedModel
   const fastOn = trial || fast || intrinsicFast
-  const modelLabel = trial ? 'Opus 5.5 Fast' : resolvedModel ? (resolvedModel.split('/').at(-1) ?? resolvedModel) : 'Model'
+  const modelLabel = resolvedModel ? (resolvedModel.split('/').at(-1) ?? resolvedModel) : 'Model'
+  // The trial model by its slug, as the picker lists it: the base model when the catalog has it.
+  const trialBase = TRIAL_MODEL.slice(0, -'-fast'.length)
+  const trialLabel = (models.length === 0 || models.includes(trialBase) ? trialBase : TRIAL_MODEL).split('/').at(-1)
   // The static shell cannot know browser preferences or a chat's stored model.
   // Reserve its space until that session's selection is known, never paint a
   // different model while cookies or shared chat settings are being restored.
@@ -937,9 +940,9 @@ export default function Composer({
             />
 
             {trialRegion((isTrial) => isTrial ? (
-              <Button variant="ghost" size="sm" disabled aria-label="Model: Opus 5.5 Fast"
+              <Button variant="ghost" size="sm" disabled aria-label={`Model: ${trialLabel}`}
                 className="h-8 min-w-0 max-w-44 flex-1 justify-start px-2 text-sm font-normal text-muted-foreground">
-                <span className="truncate">Opus 5.5 Fast</span>
+                <span className="truncate">{trialLabel}</span>
               </Button>
             ) : <Popover
               modal
