@@ -12,6 +12,7 @@ export function memoryRedis() {
     hset(key, entries) { hashes.set(key, { ...(hashes.get(key) ?? {}), ...entries }); return 1 },
     hget(key, field) { return hashes.get(key)?.[field] ?? null },
     hlen(key) { return Object.keys(hashes.get(key) ?? {}).length },
+    hkeys(key) { return Object.keys(hashes.get(key) ?? {}) },
     hgetall(key) { return hashes.get(key) ?? null },
     sadd(key, member) { sets.set(key, [...new Set([...(sets.get(key) ?? []), member])]); return 1 },
     smembers(key) { return sets.get(key) ?? [] },

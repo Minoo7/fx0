@@ -75,7 +75,7 @@ test('no later message or renewal changes who pays for an earlier turn', async (
   }
 })
 
-test('a chat from before per-turn funding bills its latest credential until its first pinned message', async (t) => {
+test('a turn from before per-turn funding bills as it did then, and a later turn with no record bills nothing', async (t) => {
   useSecret(t)
   const credentials = await turnCredentialWith(t, memoryRedis())
   // Before this change a paid message stored only the chat's latest credential.
@@ -84,9 +84,42 @@ test('a chat from before per-turn funding bills its latest credential until its 
   assert.deepEqual(await billed(credentials, undefined), ['laptop', 'team_a', 'laptop-team_a'])
 
   await credentials.saveTurnCredential('chat', session('phone', 'team_b'), 5)
-  assert.equal(await billed(credentials, 4), 'unbound-turn', 'the old turn cannot bill the new sender')
+  // Turn 4 was running or queued when the deploy landed: it bills the chat's
+  // latest credential, as it would have before, so a follow-up never cuts it off.
+  assert.deepEqual(await billed(credentials, 4), ['phone', 'team_b', 'phone-team_b'], 'the pre-deploy turn keeps running')
+  assert.equal(await billed(credentials, 6), 'unbound-turn', 'every message since is pinned, so a later turn with no record bills nothing')
   assert.equal(await billed(credentials, undefined), 'no-turn')
   assert.deepEqual(await billed(credentials, 5), ['phone', 'team_b', 'phone-team_b'])
+})
+
+test('paid funding records stay out of the record the code before them reads, so a rollback bills as it did', async (t) => {
+  useSecret(t)
+  const store = memoryRedis()
+  const credentials = await turnCredentialWith(t, store)
+  await credentials.saveTurnCredential('chat', session('laptop', 'team_a'), 1)
+  await credentials.saveTurnCredential('chat', session('phone', 'team_b'), 2)
+  // The code before per-turn funding refuses a chat's unpinned paid turns once
+  // `funding:` holds any record, and it pins no paid message.
+  assert.equal(store.hashes.has('test:funding:chat'), false)
+  assert.deepEqual(Object.keys(store.hashes.get('test:paid-funding:chat')), ['1', '2'])
+  // Sponsored turns stay where that code reads them.
+  const previous = { key: process.env.AI_GATEWAY_API_KEY, enabled: process.env.FX0_FREE_PROMPTS }
+  Object.assign(process.env, { AI_GATEWAY_API_KEY: 'synthetic-server-key-never-store', FX0_FREE_PROMPTS: '1' })
+  t.after(() => {
+    for (const [name, value] of Object.entries({ AI_GATEWAY_API_KEY: previous.key, FX0_FREE_PROMPTS: previous.enabled })) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value
+    }
+  })
+  await credentials.saveTrialCredential('chat', { kind: 'trial', userId: 'user-a', loginId: 'laptop', expiresAt: Date.now() + HOUR }, 3)
+  assert.deepEqual(Object.keys(store.hashes.get('test:funding:chat')), ['3'])
+  // A paid record that code wrote in `funding:` (a trial chat's) still bills its turn.
+  store.hashes.set('test:funding:chat', { ...store.hashes.get('test:funding:chat'), 1: store.hashes.get('test:paid-funding:chat')[1] })
+  delete store.hashes.get('test:paid-funding:chat')[1]
+  assert.deepEqual(await billed(credentials, 1), ['laptop', 'team_a', 'laptop-team_a'])
+  assert.deepEqual(await billed(credentials, 2), ['phone', 'team_b', 'phone-team_b'])
+  // Deleting the chat removes both kinds of record and every turn credential.
+  await credentials.dropChatCredential('chat')
+  assert.equal(store.hashes.size + store.values.size, 0)
 })
 
 test('a paid message whose credential cannot be stored is not admitted', async (t) => {
@@ -107,7 +140,7 @@ test('sign-out drops the departing login\'s turn credentials and keeps every fun
   assert.deepEqual(await credentials.dropLoginCredentials('laptop'), [{ chatId: 'chat', turns: 1, latest: 'not-this-login' }])
   assert.equal(await billed(credentials, 1), 'unusable', 'no fallback to the latest credential')
   assert.deepEqual(await billed(credentials, 2), ['phone', 'team_b', 'phone-team_b'])
-  assert.deepEqual(Object.keys(store.hashes.get('test:funding:chat')), ['1', '2'])
+  assert.deepEqual(Object.keys(store.hashes.get('test:paid-funding:chat')), ['1', '2'])
   assert.deepEqual(await credentials.dropLoginCredentials('laptop'), [], 'a repeated sign-out finds nothing')
   assert.deepEqual(await credentials.dropLoginCredentials('phone'), [{ chatId: 'chat', turns: 1, latest: 'deleted' }])
   assert.equal(await billed(credentials, 2), 'unusable')
@@ -161,11 +194,13 @@ test('resolution bills a turn\'s recorded identity and team, or nothing', async 
   const trial = (loginId) => ({ kind: 'trial', userId: 'user-a', loginId, expiresAt: Date.now() + HOUR })
   const credentials = [null, trial('laptop'), trial('phone'), user('laptop', 'team_a'), user('laptop', 'team_b'), user('phone', 'team_a')]
   const bindings = [null, { kind: 'trial', userId: 'user-a', loginId: 'laptop' }, { kind: 'user', userId: 'user-a', loginId: 'laptop', teamId: 'team_a' }]
-  for (const records of [0, 1]) for (const turnId of [null, 7]) for (const binding of bindings) {
+  for (const records of [0, 1]) for (const turnId of [null, 7]) for (const binding of bindings) for (const firstFunded of [null, 5, 9]) {
     for (const exact of credentials) for (const latest of credentials) {
-      const where = JSON.stringify({ records, turnId, binding, exact, latest })
-      const funding = resolveFunding(records, turnId, binding, exact, latest)
-      if (records === 0) {
+      const where = JSON.stringify({ records, turnId, binding, firstFunded, exact, latest })
+      const funding = resolveFunding(records, turnId, binding, exact, latest, firstFunded)
+      // A chat with no records, or a turn with none that is older than the chat's
+      // first, bills the latest user credential.
+      if (records === 0 || (turnId !== null && !binding && firstFunded !== null && turnId < firstFunded)) {
         assert.equal(funding.ok, !!latest && !('kind' in latest), where)
         if (funding.ok) assert.equal(funding.credential, latest, where)
         continue

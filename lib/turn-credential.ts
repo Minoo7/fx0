@@ -29,6 +29,10 @@ function password(): string {
 
 const credentialKey = (chatId: string) => prefixed(`credential:${chatId}`)
 const fundingKey = (chatId: string) => prefixed(`funding:${chatId}`)
+// Paid turns' funding records. The code before per-turn funding also reads
+// `funding:`, and refuses a chat's unpinned paid turns once it holds any record.
+// Kept apart, a rollback to that code bills paid chats as it always did.
+const paidFundingKey = (chatId: string) => prefixed(`paid-funding:${chatId}`)
 const turnCredentialKey = (chatId: string, turnId: number) => `${credentialKey(chatId)}:turn:${turnId}`
 const loginKey = (loginId: string) => prefixed(`login-chats:${loginId}`)
 const revokedLoginKey = (loginId: string) => prefixed(`revoked-login:${loginId}`)
@@ -107,7 +111,7 @@ async function storeCredential(chatId: string, credential: TurnCredential, ttlSe
     pipeline.set(turnCredentialKey(chatId, turnId), sealed, { ex: ttlSeconds })
       // This non-secret marker survives expiry/revocation, so a missing trial
       // credential can never fall back to the customer's latest paid grant.
-      .hset(fundingKey(chatId), { [String(turnId)]: JSON.stringify(binding) })
+      .hset(sponsored ? fundingKey(chatId) : paidFundingKey(chatId), { [String(turnId)]: JSON.stringify(binding) })
   }
   await pipeline.sadd(loginKey(credential.loginId), chatId)
     // The index outlives no credential it lists: a login's tokens expire too.
@@ -157,17 +161,22 @@ const refuse = (refused: FundingRefusal): ExecutionFunding => ({ ok: false, refu
 // What funds a turn's model request, from the chat's records alone. A turn with
 // a funding record bills that record's user, login and team, or nothing: later
 // messages and renewals can change only the token. A chat with no records at
-// all predates per-turn funding and bills its latest user credential.
+// all predates per-turn funding and bills its latest user credential, and so
+// does a turn older than the chat's first record (`firstFunded`): one that was
+// already running or queued when per-turn funding shipped. Every message since
+// is pinned before libfx sees it, so any other turn without a record bills nothing.
 export function resolveFunding(
   records: number,
   turnId: number | null,
   binding: FundingBinding | null,
   exact: TurnCredential | null,
   latest: TurnCredential | null,
+  firstFunded: number | null = null,
 ): ExecutionFunding {
-  if (records === 0) return latest && !('kind' in latest) ? { ok: true, credential: latest } : refuse('unusable')
+  const latestUser = (): ExecutionFunding => latest && !('kind' in latest) ? { ok: true, credential: latest } : refuse('unusable')
+  if (records === 0) return latestUser()
   if (turnId === null) return refuse('no-turn')
-  if (!binding) return refuse('unbound-turn')
+  if (!binding) return firstFunded !== null && turnId < firstFunded ? latestUser() : refuse('unbound-turn')
   const sameLogin = (credential: TurnCredential | null) =>
     credential?.userId === binding.userId && credential.loginId === binding.loginId
   if (binding.kind === 'trial') return exact && 'kind' in exact && sameLogin(exact) ? { ok: true, credential: exact } : refuse('unusable')
@@ -184,13 +193,32 @@ export function resolveFunding(
 // selection, on every request, and is never cached.
 export async function readExecutionFunding(chatId: string, turnId?: number): Promise<ExecutionFunding> {
   const turn = Number.isSafeInteger(turnId) && (turnId as number) > 0 ? turnId as number : null
-  const pipeline = redis().pipeline().hlen(fundingKey(chatId)).get(credentialKey(chatId))
-  if (turn !== null) pipeline.hget(fundingKey(chatId), String(turn)).get(turnCredentialKey(chatId, turn))
+  const pipeline = redis().pipeline().hlen(fundingKey(chatId)).hlen(paidFundingKey(chatId)).get(credentialKey(chatId))
+  if (turn !== null) pipeline.hget(paidFundingKey(chatId), String(turn)).hget(fundingKey(chatId), String(turn)).get(turnCredentialKey(chatId, turn))
   const values: unknown[] = await pipeline.exec()
-  const [count, latestSeal, bindingValue, turnSeal] = values
-  const [latest, exact] = await Promise.all([decodeCredential(latestSeal), decodeCredential(turnSeal)])
-  const funding = resolveFunding(Number(count), turn, fundingBinding(bindingValue), exact, latest)
+  const [count, paidCount, latestSeal, paidBinding, binding, turnSeal] = values
+  const records = Number(count) + Number(paidCount)
+  const bindingValue = paidBinding ?? binding
+  const [latest, exact, firstFunded] = await Promise.all([
+    decodeCredential(latestSeal),
+    decodeCredential(turnSeal),
+    // Only a turn with no record at all needs the chat's first record.
+    records > 0 && turn !== null && bindingValue == null ? firstFundedTurn(chatId) : null,
+  ])
+  const funding = resolveFunding(records, turn, fundingBinding(bindingValue), exact, latest, firstFunded)
   return funding.ok && await loginRevoked(funding.credential.loginId) ? refuse('revoked') : funding
+}
+
+// The chat's first funded turn, across both kinds of record.
+async function firstFundedTurn(chatId: string): Promise<number | null> {
+  const [trial, paid] = await redis().pipeline().hkeys(fundingKey(chatId)).hkeys(paidFundingKey(chatId)).exec() as [unknown, unknown]
+  const ids = [trial, paid].flatMap((keys) => Array.isArray(keys) ? keys.map(Number) : []).filter((id) => Number.isSafeInteger(id) && id > 0)
+  return ids.length ? Math.min(...ids) : null
+}
+
+// A chat's funding records of both kinds, by turn.
+function fundingRecords(trial: unknown, paid: unknown): Record<string, unknown> {
+  return { ...(trial ?? {}) as Record<string, unknown>, ...(paid ?? {}) as Record<string, unknown> }
 }
 
 // What sign-out deletes in one chat, from what the chat held when read: the
@@ -234,11 +262,11 @@ export async function dropLoginCredentials(loginId: string): Promise<DroppedChat
   // with one compare-and-delete script per chat. The seal is decoded directly:
   // sign-out has already revoked this login.
   const reads = redis().pipeline()
-  for (const chatId of chats) reads.get(credentialKey(chatId)).hgetall(fundingKey(chatId))
+  for (const chatId of chats) reads.get(credentialKey(chatId)).hgetall(fundingKey(chatId)).hgetall(paidFundingKey(chatId))
   const values: unknown[] = chats.length ? await reads.exec() : []
   const cleanups = await Promise.all(chats.map(async (chatId, index) => {
-    const latestSeal = values[index * 2]
-    const bindings = (values[index * 2 + 1] ?? {}) as Record<string, unknown>
+    const latestSeal = values[index * 3]
+    const bindings = fundingRecords(values[index * 3 + 1], values[index * 3 + 2])
     return { chatId, ...signOutCleanup(loginId, bindings, latestSeal, await decodeCredential(latestSeal)) }
   }))
   const owned = cleanups.filter(({ turnIds, latestSeal }) => turnIds.length || latestSeal !== null)
@@ -255,6 +283,8 @@ export async function dropLoginCredentials(loginId: string): Promise<DroppedChat
 }
 
 export async function dropChatCredential(chatId: string): Promise<void> {
-  const bindings = await redis().hgetall<Record<string, unknown>>(fundingKey(chatId)) ?? {}
-  await redis().del(credentialKey(chatId), fundingKey(chatId), ...Object.keys(bindings).map(id => turnCredentialKey(chatId, Number(id))))
+  const [trial, paid] = await redis().pipeline().hgetall(fundingKey(chatId)).hgetall(paidFundingKey(chatId)).exec() as [unknown, unknown]
+  const bindings = fundingRecords(trial, paid)
+  await redis().del(credentialKey(chatId), fundingKey(chatId), paidFundingKey(chatId),
+    ...Object.keys(bindings).map(id => turnCredentialKey(chatId, Number(id))))
 }
