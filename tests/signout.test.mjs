@@ -129,7 +129,7 @@ test('logout waits for one durable revocation write, then returns before cleanup
   assert.equal((await credentials.readExecutionCredential('phone-chat', 1)).loginId, phone.loginId)
   assert.equal(fetch.mock.callCount(), 0, 'provider revocation does not block success')
   assert.equal(state.cancellations.length, 0)
-  assert.equal(response.headers.get('clear-site-data'), '"cache"')
+  assert.equal(response.headers.get('clear-site-data'), null, 'Clear-Site-Data stalls Chrome for seconds; previews revalidate instead')
   assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith(`${secure.grantCookieName(laptop.loginId)}=`) && cookie.includes('Max-Age=0')))
   await state.after[0]()
   assert.deepEqual(state.cancellations, [[laptop.userId, laptop.loginId]])

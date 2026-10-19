@@ -1088,6 +1088,13 @@ test('signout immediately clears the app, fences late boot data and offers retry
   const retryButton = find(app.tree(), node => node.props?.children === 'Retry sign out')
   assert.ok(retryButton)
   assert.deepEqual(navigations, [])
+  // The old grant is unusable and retrying may keep failing; a fresh sign-in must stay open.
+  const failedMenu = controls.render(accountProps())
+  const signInAfterFailure = find(failedMenu, node => node.props?.children === 'Sign in')
+  assert.equal(signInAfterFailure.props.disabled, false)
+  signInAfterFailure.props.onClick({ detail: 0 })
+  assert.deepEqual(navigations, ['/api/auth/signin'])
+  navigations.length = 0
   retry = true
   // A reload remounts the guest app while the old HttpOnly grant may still
   // exist. The durable intent resumes the POST without another user click.

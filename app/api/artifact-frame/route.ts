@@ -12,10 +12,15 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
   const past = Number.isSafeInteger(revision) && revision > 0
   const live = past ? null : await readDesignArtifactAt(sessionId)
   const artifact = past ? await readGeneration(user.id, sessionId, revision) : live!.html
-  // ?v= names the revision the page expects. When it is the one live, this response
-  // is that revision for good, so the browser keeps it; sign-out clears the cache.
+  // ?v= names the revision the page expects. When it is the one live, the browser may
+  // keep this response but must revalidate it: this route checks the session first,
+  // so a reload costs a 304 and a signed-out browser gets nothing from its cache.
   const version = Number(params.get('v'))
-  const immutable = live?.html != null && Number.isSafeInteger(version) && version > 0 && version === live.revision
+  const cacheable = live?.html != null && Number.isSafeInteger(version) && version > 0 && version === live.revision
+  const etag = cacheable ? `"${sessionId}:${live.revision}"` : null
+  if (etag && request.headers.get('if-none-match') === etag) {
+    return new Response(null, { status: 304, headers: { 'cache-control': 'private, no-cache', etag } })
+  }
   const readyToken = crypto.randomUUID()
   const preparedArtifact = artifact == null
     ? `<!doctype html><html><head><meta charset="utf-8"><title>No design artifact</title></head><body><p>${
@@ -91,7 +96,8 @@ document.querySelector('#frame-root').append(frame);
   return new Response(html, {
     status: artifact == null ? 404 : 200,
     headers: {
-      'cache-control': immutable ? 'private, max-age=31536000, immutable' : 'private, no-store',
+      'cache-control': etag ? 'private, no-cache' : 'private, no-store',
+      ...(etag ? { etag } : {}),
       'content-security-policy': csp,
       'content-type': 'text/html; charset=utf-8',
       'permissions-policy':

@@ -697,7 +697,7 @@ test('logout rejects cross-origin or missing Origin; same-origin clears both coo
   const request = await requestWithSession('/api/auth/signout', session(), { origin: 'https://fx0.example' })
   const response = await signout(request)
   assert.equal(response.status, 200)
-  assert.equal(response.headers.get('clear-site-data'), '"cache"', 'cached previews do not outlive the sign-out')
+  assert.equal(response.headers.get('clear-site-data'), null, 'cached previews revalidate against the session instead')
   await globalThis.__signoutAfter
   assert.equal(calls, 1)
   const cookies = response.headers.getSetCookie()
