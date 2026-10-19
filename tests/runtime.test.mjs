@@ -17,7 +17,7 @@ const forward = (root, names) => names.map((name) =>
   `export const ${name} = (...args) => globalThis.__fx0Runtime.${root}.${name}(...args)`).join('\n')
 const journalUrl = dataUrl(`export class SessionCleanupError extends Error {}\nexport const QUESTION_WAIT_MS = 600000\n` + forward('journal', journalNames))
 const libfxUrl = dataUrl(forward('libfx', ['createFxAgent', 'createFxEngine']))
-const credentialUrl = dataUrl(forward('credentialStore', ['saveTurnCredential', 'saveTrialCredential', 'renewLatestCredential', 'readTurnCredential', 'readExecutionFunding', 'readTurnFunding', 'dropLoginCredentials', 'dropChatCredential']))
+const credentialUrl = dataUrl(forward('credentialStore', ['saveTurnCredential', 'saveTrialCredential', 'renewLatestCredential', 'readTurnCredential', 'readExecutionFunding', 'dropLoginCredentials', 'dropChatCredential']))
 const historyUrl = dataUrl(forward('history', ['recordTurn', 'recordGeneration']))
 const gatewayUrl = dataUrl(`import { AuthError } from ${JSON.stringify(new URL('../lib/accounts.ts', import.meta.url).href)}
 export const RATE_LIMIT_ATTEMPTS = 3
@@ -217,7 +217,6 @@ function fixture(t, stored = { preferredModel: null, preferredEffort: null, pref
         const credential = executionCredentials.get(`${chatId}:${turnId}`) ?? credentials.get(chatId) ?? null
         return credential ? { ok: true, credential } : { ok: false, refused: 'unusable' }
       },
-      readTurnFunding: async (chatId, turnId) => fundings.get(`${chatId}:${turnId}`) ?? null,
       dropLoginCredentials: async (loginId) => {
         const chatOf = (key) => key.slice(0, key.lastIndexOf(':'))
         const dropped = []
@@ -226,8 +225,8 @@ function fixture(t, stored = { preferredModel: null, preferredEffort: null, pref
           const turns = [...fundings].filter(([key, funding]) => chatOf(key) === chatId && funding.loginId === loginId)
           if (!latestWasLogin && !turns.length) continue
           if (latestWasLogin) credentials.delete(chatId)
-          for (const [key] of turns) executionCredentials.delete(key)
-          dropped.push({ chatId, latestWasLogin })
+          const deleted = turns.filter(([key]) => executionCredentials.delete(key)).length
+          dropped.push({ chatId, turns: deleted, latest: latestWasLogin ? 'deleted' : 'not-this-login' })
         }
         return dropped
       },
@@ -456,7 +455,7 @@ test('cancel stops the running libfx turn, and does nothing when the chat is idl
   assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [['cancel', 'wrun_9']])
 })
 
-test('sign-out drops only this login\'s chat credentials and cancels those chats\' running turns', async (t) => {
+test('sign-out drops only this login\'s chat credentials and cancels no turn', async (t) => {
   const f = fixture(t, { libfxSessionId: 'wrun_5' })
   f.credentials.set('laptop-chat', credential('user-a', 'login-laptop'))
   f.credentials.set('phone-chat', credential('user-a', 'login-phone'))
@@ -467,23 +466,31 @@ test('sign-out drops only this login\'s chat credentials and cancels those chats
   assert.equal(laptop.gatewaySession, null)
   assert.equal(phone.gatewaySession?.loginId, 'login-phone')
   assert.deepEqual([...f.credentials.keys()], ['phone-chat'])
-  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [['cancel', 'wrun_5']])
+  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [], 'its turn stops at its next model request instead')
 })
 
-test('signing out on the phone leaves the turn the laptop funded running', async (t) => {
+test('in a trial-marked chat, each login\'s sign-out drops only its own turns\' credentials and cancels nothing', async (t) => {
   const f = fixture(t, { libfxSessionId: 'wrun_6' })
   const host = boundHost('shared-chat', credential('user-a', 'login-laptop', 'laptop-token'))
-  await runtime.submitPrompt(host, 'Ada', 'Laptop turn')
-  f.setActive({ id: 1 })
-  // The phone's message joins the laptop's running turn and becomes the chat's
-  // latest credential.
-  await runtime.submitPrompt(host, 'Ada', 'Phone note', undefined, undefined, undefined, undefined, undefined, credential('user-a', 'login-phone', 'phone-token'))
-  assert.equal(sendKind(f.sent[1]), 'steer')
-  await runtime.cancelUserRuntime('user-a', 'login-phone')
-  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [], 'the laptop funded the running turn')
-  assert.equal(host.gatewaySession?.loginId, 'login-laptop')
+  const free = { kind: 'trial', userId: 'user-a', loginId: 'login-laptop', expiresAt: Date.now() + 86400000 }
+  await runtime.submitPrompt(host, 'Ada', 'Free design', 'free-1', undefined, undefined, undefined, free)
+  await runtime.submitPrompt(host, 'Ada', 'Paid follow-up', 'paid-2', undefined, undefined, undefined, undefined, credential('user-a', 'login-phone', 'phone-token'))
+  assert.equal(f.stored.trialChat, true)
+  f.setActive({ id: 2 }) // the phone's paid turn is running
+
   await runtime.cancelUserRuntime('user-a', 'login-laptop')
-  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [['cancel', 'wrun_6']])
+  assert.deepEqual([...f.executionCredentials.keys()], ['shared-chat:2'], 'the phone\'s turn keeps its credential')
+  assert.equal(f.credentials.get('shared-chat')?.loginId, 'login-phone')
+  await runtime.cancelUserRuntime('user-a', 'login-phone')
+  assert.deepEqual([...f.executionCredentials.keys()], [])
+  assert.equal(f.credentials.has('shared-chat'), false)
+
+  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [])
+  const signOuts = console.info.mock.calls.map((call) => JSON.parse(call.arguments[0])).filter((line) => line.event === 'signout:credentials')
+  assert.deepEqual(signOuts.map(({ session, turns, latest }) => [session, turns, latest]), [
+    ['shared-chat', 1, 'not-this-login'],
+    ['shared-chat', 1, 'deleted'],
+  ])
 })
 
 test('deletion refuses a chat with a running turn and otherwise drops its records, mapping and credential', async (t) => {

@@ -7,7 +7,6 @@ import {
   dropChatCredential,
   dropLoginCredentials,
   readTurnCredential,
-  readTurnFunding,
   renewLatestCredential,
   saveTrialCredential,
   saveTurnCredential,
@@ -431,11 +430,12 @@ export async function deleteDesignSession(host: SessionState): Promise<boolean> 
 }
 
 /**
- * Sign-out deletes the chat credentials this login stored, then cancels the
- * running turns this login funded. A turn another login funded keeps running
- * on its own credential. A turn of this login that still reaches the model
- * finds no credential and ends with "sign in again"; nothing falls back to
- * another login or the deployment.
+ * After sign-out has revoked this login, deletes the chat credentials it stored.
+ * A turn this login funded finds no credential at its next model request and
+ * ends with "sign in again"; nothing falls back to another login or the
+ * deployment. It cancels no turn: libfx's cancel stops whichever turn is open
+ * when it lands, which may already be another login's, so only the credentials
+ * fence this login's turns.
  */
 export async function cancelUserRuntime(userId: string, loginId?: string): Promise<void> {
   for (const host of registry().values()) {
@@ -443,18 +443,9 @@ export async function cancelUserRuntime(userId: string, loginId?: string): Promi
   }
   // A session without a login id never stored a chat credential.
   if (!loginId) return
-  const chats = await dropLoginCredentials(loginId)
-  await Promise.all(chats.map(async ({ chatId, latestWasLogin }) => {
-    const [active, stored] = await Promise.all([getActiveTurn(chatId), readSession(chatId)])
-    if (!active || !stored?.libfxSessionId) return
-    // Only a turn this login's own message funded stops. A turn with no funding
-    // record can bill at most the chat's latest credential, so it stops when
-    // that credential was this login's.
-    const funding = await readTurnFunding(chatId, active.id)
-    const stops = funding ? funding.loginId === loginId : latestWasLogin
-    log(chatId, 'signout:turn', { turn: active.id, cancelled: stops })
-    if (stops) await agent().session(stored.libfxSessionId).cancel().catch(() => {})
-  }))
+  for (const { chatId, turns, latest } of await dropLoginCredentials(loginId)) {
+    log(chatId, 'signout:credentials', { turns, latest })
+  }
 }
 
 export async function debugState(host: SessionState) {

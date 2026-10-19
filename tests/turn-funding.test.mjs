@@ -100,18 +100,60 @@ test('a paid message whose credential cannot be stored is not admitted', async (
 
 test('sign-out drops the departing login\'s turn credentials and keeps every funding record', async (t) => {
   useSecret(t)
-  const credentials = await turnCredentialWith(t, memoryRedis())
+  const store = memoryRedis()
+  const credentials = await turnCredentialWith(t, store)
   await credentials.saveTurnCredential('chat', session('laptop', 'team_a'), 1)
   await credentials.saveTurnCredential('chat', session('phone', 'team_b'), 2)
-  assert.deepEqual(await credentials.dropLoginCredentials('laptop'), [{ chatId: 'chat', latestWasLogin: false }])
+  assert.deepEqual(await credentials.dropLoginCredentials('laptop'), [{ chatId: 'chat', turns: 1, latest: 'not-this-login' }])
+  assert.equal(await billed(credentials, 1), 'unusable', 'no fallback to the latest credential')
+  assert.deepEqual(await billed(credentials, 2), ['phone', 'team_b', 'phone-team_b'])
+  assert.deepEqual(Object.keys(store.hashes.get('test:funding:chat')), ['1', '2'])
+  assert.deepEqual(await credentials.dropLoginCredentials('laptop'), [], 'a repeated sign-out finds nothing')
+  assert.deepEqual(await credentials.dropLoginCredentials('phone'), [{ chatId: 'chat', turns: 1, latest: 'deleted' }])
+  assert.equal(await billed(credentials, 2), 'unusable')
+  assert.equal(await credentials.readTurnCredential('chat'), null)
+})
+
+test('sign-out keeps a latest credential another login stored after it looked', async (t) => {
+  useSecret(t)
+  const store = memoryRedis()
+  const credentials = await turnCredentialWith(t, store)
+  await credentials.saveTurnCredential('chat', session('laptop', 'team_a'), 1)
+  // The phone's message lands between the laptop's sign-out reading the chat
+  // and running its delete pipeline.
+  const open = store.client.pipeline
+  store.client.pipeline = () => {
+    const pipeline = open()
+    const { eval: script, exec } = pipeline
+    let deletes = false
+    pipeline.eval = (...args) => { deletes = true; return script(...args) }
+    pipeline.exec = async () => {
+      if (deletes) await credentials.saveTurnCredential('chat', session('phone', 'team_b'), 2)
+      return exec()
+    }
+    return pipeline
+  }
+  const dropped = await credentials.dropLoginCredentials('laptop')
+  assert.equal((await credentials.readTurnCredential('chat'))?.loginId, 'phone', 'the phone\'s credential survives')
+  assert.deepEqual(dropped, [{ chatId: 'chat', turns: 1, latest: 'replaced' }])
   assert.equal(await billed(credentials, 1), 'unusable')
   assert.deepEqual(await billed(credentials, 2), ['phone', 'team_b', 'phone-team_b'])
-  assert.equal((await credentials.readTurnFunding('chat', 1)).loginId, 'laptop')
-  assert.equal((await credentials.readTurnFunding('chat', 2)).loginId, 'phone')
-  assert.equal(await credentials.readTurnFunding('chat', 3), null)
-  assert.deepEqual(await credentials.dropLoginCredentials('phone'), [{ chatId: 'chat', latestWasLogin: true }])
-  assert.equal(await billed(credentials, 2), 'unusable')
 })
+
+test('sign-out cleanup names only the departing login\'s turns, and the latest credential only if it is that login\'s', async (t) => {
+  const { signOutCleanup } = await turnCredentialWith(t, memoryRedis())
+  const record = (kind, loginId) => JSON.stringify({ kind, userId: 'user-a', loginId, ...(kind === 'user' ? { teamId: 'team_a' } : {}) })
+  const bindings = { 1: record('trial', 'laptop'), 2: record('user', 'phone'), 3: record('user', 'laptop'), 4: 'not a record' }
+  const user = (loginId) => ({ userId: 'user-a', loginId, accessToken: 'token', teamId: 'team_a', expiresAt: Date.now() + HOUR })
+  assert.deepEqual(plan(signOutCleanup('laptop', bindings, 'sealed-laptop', user('laptop'))), [[1, 3], 'sealed-laptop'])
+  assert.deepEqual(plan(signOutCleanup('laptop', bindings, 'sealed-phone', user('phone'))), [[1, 3], null])
+  assert.deepEqual(plan(signOutCleanup('phone', bindings, 'sealed-laptop', user('laptop'))), [[2], null])
+  assert.deepEqual(plan(signOutCleanup('tablet', bindings, null, null)), [[], null])
+  // A seal that no longer opens, such as an expired one, names nothing to compare.
+  assert.deepEqual(plan(signOutCleanup('laptop', {}, 'expired-seal', null)), [[], null])
+})
+
+const plan = ({ turnIds, latestSeal }) => [turnIds, latestSeal]
 
 test('resolution bills a turn\'s recorded identity and team, or nothing', async (t) => {
   const { resolveFunding } = await turnCredentialWith(t, memoryRedis())

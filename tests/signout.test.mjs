@@ -42,6 +42,16 @@ function fixture(t) {
     pipeline() {
       const work = []
       const pipeline = {}
+      let deletes = false
+      const drop = (key) => Number(values.delete(key) | indices.delete(key) | hashes.delete(key))
+      // Sign-out's compare-and-delete script: KEYS[2..], and KEYS[1] only while
+      // it holds ARGV[1]. tests/turn-credential.integration.mjs runs the real Lua.
+      pipeline.eval = (_script, keys, args) => {
+        deletes = true
+        work.push(() => [keys.slice(1).reduce((count, key) => count + drop(key), 0), args[0] !== '' && values.get(keys[0]) === args[0] ? drop(keys[0]) : 0])
+        return pipeline
+      }
+      pipeline.del = (...keys) => { deletes = true; work.push(() => keys.reduce((count, key) => count + drop(key), 0)); return pipeline }
       for (const [name, execute] of Object.entries({
         set: (key, value) => values.set(key, value),
         sadd: (key, value) => indices.set(key, [...(indices.get(key) ?? []), value]),
@@ -56,6 +66,7 @@ function fixture(t) {
         state.commands.push('pipeline')
         state.saveStarted?.resolve()
         if (state.saveGate) await state.saveGate.promise
+        if (deletes && state.fail === 'delete') throw new Error('synthetic delete failure')
         return work.map((execute) => execute())
       }
       return pipeline

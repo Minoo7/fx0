@@ -303,10 +303,10 @@ test('journal Redis integration uses isolated durable session state', async (t) 
       assert.equal(await credentials.readTurnCredential('cred-laptop'), null, 'another secret cannot unseal it')
       process.env.SESSION_SECRET = secret
 
-      assert.deepEqual(await credentials.dropLoginCredentials('login-laptop'), [{ chatId: 'cred-laptop', latestWasLogin: true }])
+      assert.deepEqual(await credentials.dropLoginCredentials('login-laptop'), [{ chatId: 'cred-laptop', turns: 1, latest: 'deleted' }])
       assert.equal(await credentials.readTurnCredential('cred-laptop'), null)
       assert.equal((await credentials.readExecutionFunding('cred-laptop', 1)).ok, false)
-      assert.equal((await credentials.readTurnFunding('cred-laptop', 1))?.loginId, 'login-laptop', 'sign-out keeps the funding record')
+      assert.equal(await redis.hlen(`${prefix}:funding:cred-laptop`), 1, 'sign-out keeps the funding record')
       assert.equal((await credentials.readTurnCredential('cred-phone'))?.accessToken, 'access-phone-secret')
       await assert.rejects(credentials.saveTurnCredential('cred-expired', { ...session('login-x', 'x'), expiresAt: Date.now() - 1 }, 1), /Sign in again/)
       assert.equal(await credentials.readTurnCredential('cred-expired'), null, 'an expired token is never stored')

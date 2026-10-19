@@ -191,37 +191,65 @@ export async function readExecutionFunding(chatId: string, turnId?: number): Pro
   return funding.ok && await loginRevoked(funding.credential.loginId) ? refuse('revoked') : funding
 }
 
-// A turn's funding record. Sign-out deletes credentials, never these records.
-export async function readTurnFunding(chatId: string, turnId: number): Promise<FundingBinding | null> {
-  return fundingBinding(await redis().hget(fundingKey(chatId), String(turnId)))
+// What sign-out deletes in one chat, from what the chat held when read: the
+// credentials of the turns this login funded, and the chat's latest credential
+// if it was this login's, named by its exact sealed value. Funding records stay,
+// so a turn whose credential is gone bills nothing rather than a fallback.
+export interface SignOutCleanup { turnIds: number[]; latestSeal: string | null }
+
+export function signOutCleanup(
+  loginId: string,
+  bindings: Record<string, unknown>,
+  latestSeal: unknown,
+  latest: TurnCredential | null,
+): SignOutCleanup {
+  const turnIds = Object.entries(bindings).filter(([, value]) => fundingBinding(value)?.loginId === loginId).map(([id]) => Number(id))
+  const own = typeof latestSeal === 'string' && latest !== null && !('kind' in latest) && latest.loginId === loginId
+  return { turnIds, latestSeal: own ? latestSeal : null }
 }
 
-// A chat whose credentials a sign-out dropped, and whether the chat's latest
-// credential was that login's.
-export interface DroppedChat { chatId: string; latestWasLogin: boolean }
+// Deletes the turn credentials (KEYS[2..]), and the latest credential (KEYS[1])
+// only while it still holds the sealed value the cleanup read (ARGV[1]): one
+// another login stored since then survives. Returns {turns, latest} deleted.
+export const DROP_LOGIN_CHAT = `
+local turns = 0
+for i = 2, #KEYS do turns = turns + redis.call('DEL', KEYS[i]) end
+local latest = 0
+if ARGV[1] ~= '' and redis.call('GET', KEYS[1]) == ARGV[1] then latest = redis.call('DEL', KEYS[1]) end
+return {turns, latest}
+`
+
+// A chat a sign-out cleaned: how many turn credentials it deleted, and what
+// became of the chat's latest credential.
+export interface DroppedChat { chatId: string; turns: number; latest: 'deleted' | 'replaced' | 'not-this-login' }
 
 // Sign-out: removes every chat credential this login stored, but not one a later
-// prompt from another login of the user has since replaced.
+// prompt from another login of the user has since replaced. Cancels nothing:
+// a turn this login funded stops at its next model request.
 export async function dropLoginCredentials(loginId: string): Promise<DroppedChat[]> {
   const chats = (await redis().smembers(loginKey(loginId))) ?? []
-  // One round trip reads every chat's credential and funding; a second deletes.
-  // The seal is decoded directly: sign-out has already revoked this login.
-  const pipeline = redis().pipeline()
-  for (const chatId of chats) pipeline.get(credentialKey(chatId)).hgetall(fundingKey(chatId))
-  const values: unknown[] = chats.length ? await pipeline.exec() : []
-  const keys: string[] = []
-  const dropped: DroppedChat[] = []
-  await Promise.all(chats.map(async (chatId, index) => {
-    const credential = await decodeCredential(values[index * 2])
+  // One round trip reads every chat's credential and funding; a second deletes,
+  // with one compare-and-delete script per chat. The seal is decoded directly:
+  // sign-out has already revoked this login.
+  const reads = redis().pipeline()
+  for (const chatId of chats) reads.get(credentialKey(chatId)).hgetall(fundingKey(chatId))
+  const values: unknown[] = chats.length ? await reads.exec() : []
+  const cleanups = await Promise.all(chats.map(async (chatId, index) => {
+    const latestSeal = values[index * 2]
     const bindings = (values[index * 2 + 1] ?? {}) as Record<string, unknown>
-    const owned = Object.entries(bindings).filter(([, value]) => fundingBinding(value)?.loginId === loginId)
-      .map(([id]) => turnCredentialKey(chatId, Number(id)))
-    const latestWasLogin = !!credential && !('kind' in credential) && credential.loginId === loginId
-    if (latestWasLogin) owned.push(credentialKey(chatId))
-    if (owned.length) { keys.push(...owned); dropped.push({ chatId, latestWasLogin }) }
+    return { chatId, ...signOutCleanup(loginId, bindings, latestSeal, await decodeCredential(latestSeal)) }
   }))
-  await redis().del(...keys, loginKey(loginId))
-  return dropped
+  const owned = cleanups.filter(({ turnIds, latestSeal }) => turnIds.length || latestSeal !== null)
+  const deletes = redis().pipeline()
+  for (const { chatId, turnIds, latestSeal } of owned) {
+    deletes.eval(DROP_LOGIN_CHAT, [credentialKey(chatId), ...turnIds.map(id => turnCredentialKey(chatId, id))], [latestSeal ?? ''])
+  }
+  deletes.del(loginKey(loginId))
+  const results = await deletes.exec() as unknown[]
+  return owned.map(({ chatId, latestSeal }, index): DroppedChat => {
+    const [turns, latest] = results[index] as [number, number]
+    return { chatId, turns: Number(turns), latest: latestSeal === null ? 'not-this-login' : Number(latest) ? 'deleted' : 'replaced' }
+  })
 }
 
 export async function dropChatCredential(chatId: string): Promise<void> {

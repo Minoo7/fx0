@@ -17,8 +17,17 @@ export function memoryRedis() {
     smembers(key) { return sets.get(key) ?? [] },
     expire() { return 1 },
     del(...keys) {
-      for (const key of keys) { values.delete(key); hashes.delete(key); sets.delete(key) }
-      return keys.length
+      let deleted = 0
+      for (const key of keys) deleted += Number(values.delete(key) | hashes.delete(key) | sets.delete(key))
+      return deleted
+    },
+    // The one script lib/turn-credential.ts runs, DROP_LOGIN_CHAT: delete
+    // KEYS[2..], and KEYS[1] only while it holds ARGV[1].
+    // tests/turn-credential.integration.mjs runs the real Lua against Redis.
+    eval(_script, keys, args) {
+      const turns = commands.del(...keys.slice(1))
+      const latest = args[0] !== '' && values.get(keys[0]) === args[0] ? commands.del(keys[0]) : 0
+      return [turns, latest]
     },
   }
   const client = {
