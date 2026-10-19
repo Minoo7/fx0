@@ -16,7 +16,7 @@ Try it at [fx0.vercel.dev](https://fx0.vercel.dev), or clone it and make it your
 - The agent can search the web and fetch pages for reference.
 - Start from one of ten `design.md` styles, or upload your own. The ten styles, and the one-line descriptions in the picker, come from VoltAgent's [awesome-design-md](https://github.com/VoltAgent/awesome-design-md), which you can browse at [getdesign.md](https://getdesign.md). Thanks to VoltAgent for publishing them.
 - Type a message before you sign in. The draft, images included, waits in the tab for 15 minutes while you sign in.
-- A turn stops after 64 model steps, which keeps an agent stuck in a loop from running up a bill.
+- A turn stops after 64 model steps, its subagents' included, which keeps an agent stuck in a loop from running up a bill.
 - In paid-only chats, a text message sent while the agent works steers it, as in the fx CLI. Trial chats run each input as its own turn so free and paid funding stay separate.
 
 ## How fx0 uses libfx
@@ -95,7 +95,7 @@ fx0 keeps the transcript, designs and settings in Redis. Here is one message fro
 
 A tool call the crash cut off runs again only if it's safe to repeat. libfx refuses a tool that doesn't say which it is, and fx0 marks its tools in [`lib/libfx-agent.ts`](lib/libfx-agent.ts): reading the design, publishing it, fetching a page, paging through a tool result and searching the tools run again. Edits, questions and subagents don't, so the model is told those calls may have run and decides what to do. The reads start as soon as the model asks for them, while libfx saves the call.
 
-A subagent is an in-memory `createFxEngine()` inside its tool call, billed to the same chat. It has the same design tools, except that it can't start a subagent of its own.
+A subagent is an in-memory `createFxEngine()` inside its tool call, billed to the same chat. It has the same design tools, except that it can't start a subagent of its own. Its model requests count toward the parent turn's 64 steps, in a count kept in Redis ([`lib/turn-budget.ts`](lib/turn-budget.ts)), so subagents can't multiply what one turn spends. A retried or recovered request counts once.
 
 TL;DR:
 
@@ -171,6 +171,7 @@ npm run test:smoke                # runs the production build with fake sessions
 npm run test:journal:integration  # needs KV_REST_API_URL/TOKEN, writes under its own prefix
 npm run test:trial:integration    # needs local redis-server/redis-cli; no remote services
 npm run test:artifact:browser     # needs local Chrome (or CHROME_PATH); checks design CSP enforcement
+npm run test:budget:integration   # needs local redis-server/redis-cli; no remote services
 ```
 
 The auth and route tests mock Vercel, AI Gateway and both databases, so check a real sign-in and real billing on a deployment.

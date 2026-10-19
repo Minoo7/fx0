@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createFxAgent, createFxEngine, type FxAgent, type FxAgentHostTool, type FxEffort, type FxHostTool, type FxSession, type FxToolContext } from 'libfx'
 import { createTools, type ToolHost } from './tools'
 import { gatewayFetch, type GatewayError, type DesignDraftObserver } from './gateway-session'
@@ -10,6 +11,7 @@ import { TRIAL_MODEL } from './trial-policy'
 import { bindLibfxSession, chatOfLibfxSession, getActiveTurn } from './journal'
 import { createDraftContext } from './draft-context'
 import { closeDraftCall, storedDraftObserver } from './draft-store'
+import { turnBudget } from './turn-budget'
 import {
   DEFAULT_MODEL,
   MAX_TURN_MODEL_STEPS,
@@ -36,9 +38,17 @@ export interface ChatRuntime {
   toolHost(chatId: string, turnId: number, signal: AbortSignal): Promise<ToolHost>
 }
 
-// Model requests of this turn so far, from the conversation the request carries:
-// the assistant messages after the last user message, plus this one. It needs no
-// state, so it holds across crashes and across invocations.
+// Which model request of a turn this is: who sent it, and the conversation it
+// carries. A retry or a crash's resend of a step carries the same conversation, so
+// it has the same name; every new step, even after compaction, has a new one.
+export function modelStepName(sender: string, body: unknown): string {
+  const prompt = (body as { prompt?: unknown } | null)?.prompt ?? null
+  return `${sender}:${createHash('sha256').update(JSON.stringify(prompt)).digest('base64url').slice(0, 22)}`
+}
+
+// Model requests of this conversation so far: the assistant messages after the
+// last user message, plus this one. It needs no state, so it holds even where the
+// turn's shared budget (turn-budget.ts) is unknown or lost.
 export function turnModelStep(body: unknown): number {
   const prompt = (body as { prompt?: unknown })?.prompt
   if (!Array.isArray(prompt)) return 1
@@ -71,9 +81,12 @@ const chatGateways = new Map<string, ChatGateway>()
 // Every model request uses the executing turn's recorded funding. With no usable
 // credential the request fails: fx0 never falls back to the deployment's key.
 // Public model metadata, which libfx reads without a session, goes out bare.
+// `sender` is the parent turn, or one subagent run: all of them share the turn's
+// MAX_TURN_MODEL_STEPS, so subagents cannot multiply what one turn spends.
 function chatFetch(
   chatId: () => Promise<string | null>,
   executionTurn: () => number | undefined,
+  sender = 'parent',
 ): typeof fetch {
   return async (input, init) => {
     const turn = executionTurn()
@@ -81,24 +94,29 @@ function chatFetch(
     const url = new URL(input instanceof Request ? input.url : String(input))
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
     const modelRequest = method === 'POST' && url.pathname.endsWith('/language-model')
+    let body: unknown = null
     if (modelRequest && typeof init?.body === 'string') {
-      let step = 1
-      try { step = turnModelStep(JSON.parse(init.body)) } catch { /* libfx validates its own body */ }
-      if (step > MAX_TURN_MODEL_STEPS) {
-        log(id ?? 'unknown', 'turn:step-limit', { steps: MAX_TURN_MODEL_STEPS })
-        return jsonError(400, STEP_LIMIT)
-      }
+      try { body = JSON.parse(init.body) } catch { /* libfx validates its own body */ }
     }
+    const limited = () => {
+      log(id ?? 'unknown', 'turn:step-limit', { steps: MAX_TURN_MODEL_STEPS, sender: sender === 'parent' ? 'parent' : 'subagent' })
+      return jsonError(400, STEP_LIMIT)
+    }
+    // A conversation that already shows the limit stops at once, with no stored state;
+    // the turn's shared budget below also counts its subagents and survives a crash.
+    if (modelRequest && turnModelStep(body) > MAX_TURN_MODEL_STEPS) return limited()
     const gateway: ChatGateway = (id && chatGateways.get(id)) || { gatewaySession: null, rateLimitStreak: 0, lastGatewayError: null }
     let observer: DesignDraftObserver | undefined
     if (id) {
       chatGateways.set(id, gateway)
-      // Both reads use the same executing turn; reserving its preview adds no serial
-      // round trip to the credential lookup before the model request starts.
-      const [funding, draft] = await Promise.all([
+      // All three use the same executing turn; reserving its preview and its step adds
+      // no serial round trip to the funding lookup before the model request starts.
+      const [funding, draft, steps] = await Promise.all([
         readExecutionFunding(id, turn),
         turn && modelRequest ? storedDraftObserver(id, turn).catch(() => undefined) : undefined,
+        turn && modelRequest ? turnBudget().reserve(id, turn, modelStepName(sender, body)) : 0,
       ])
+      if (steps > MAX_TURN_MODEL_STEPS) return limited()
       // The request fails below with "sign in again"; the log says why, with
       // the turn and reason only, never a credential.
       if (!funding.ok && modelRequest) log(id, 'funding:refused', { turn: turn ?? null, reason: funding.refused })
@@ -226,8 +244,9 @@ export async function chatSession(
 }
 
 // A subagent is an ordinary in-memory engine inside its tool call, billed to the
-// same chat. A crash mid-call is the parent's to recover: subagent is not
-// idempotent, so libfx tells the model the call may have run.
+// same chat and counted in the parent turn's steps. A crash mid-call is the
+// parent's to recover: subagent is not idempotent, so libfx tells the model the
+// call may have run; a run the model starts again counts as a new one.
 export async function runSubagent(
   runtime: ChatRuntime,
   host: SessionState,
@@ -242,7 +261,7 @@ export async function runSubagent(
   const pinned = active?.id === turnId ? active.settings : undefined
   const engine = await createFxEngine({
     apiKey: 'session-authenticated',
-    fetch: chatFetch(async () => chatId, () => turnId),
+    fetch: chatFetch(async () => chatId, () => turnId, `subagent:${crypto.randomUUID()}`),
     model: pinned
       ? { id: pinned.model, effort: pinned.effort as FxEffort, fast: pinned.fast }
       : chatModel(host, funding.ok && 'kind' in funding.credential),
