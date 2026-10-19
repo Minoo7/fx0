@@ -16,7 +16,7 @@ Try it at [fx0.vercel.dev](https://fx0.vercel.dev), or clone it and make it your
 - The agent can search the web and fetch pages for reference.
 - Start from one of ten `design.md` styles, or upload your own. The ten styles, and the one-line descriptions in the picker, come from VoltAgent's [awesome-design-md](https://github.com/VoltAgent/awesome-design-md), which you can browse at [getdesign.md](https://getdesign.md). Thanks to VoltAgent for publishing them.
 - Type a message before you sign in. The draft, images included, waits in the tab for 15 minutes while you sign in.
-- A turn stops after 64 model steps, which keeps an agent stuck in a loop from running up a bill.
+- A turn stops after 64 model steps, its subagents' included, which keeps an agent stuck in a loop from running up a bill.
 - In paid-only chats, a text message sent while the agent works steers it, as in the fx CLI. Trial chats run each input as its own turn so free and paid funding stay separate.
 
 ## How fx0 uses libfx
@@ -85,17 +85,17 @@ fx0 keeps the transcript, designs and settings in Redis. Here is one message fro
 
 **1. Save the message before answering.** `POST /api/prompt` adds the message to the transcript in one Redis script, then hands it to libfx with its message id. libfx stores it before acknowledging, so a message that shows as sent can't be lost, and a retried request reaches the same turn.
 
-**2. Keep the turn's funding.** A queue delivery has no browser cookie, so the prompt route seals its funding in Redis. Paid-only chats use the sender's OAuth grant. A trial chat records each turn's funding separately: either the admitted sponsorship or its paid sender and team. Fresh SDK diagnostics and the journal's restore hook identify the executing turn after a crash. Refresh tokens stay in the cookie, and the server trial key stays out of every stored credential. Missing or expired trial funding never falls back to a customer's paid grant.
+**2. Keep the turn's funding.** A queue delivery has no browser cookie, so the prompt route seals its funding in Redis. Every message records the funding of the turn it starts: either the admitted sponsorship or its paid sender's OAuth grant and team. Fresh SDK diagnostics and the journal's restore hook identify the executing turn after a crash. Refresh tokens stay in the cookie, and the server trial key stays out of every stored credential. Missing or expired trial funding never falls back to a customer's paid grant.
 
 **3. libfx runs the turn.** One worker holds a session at a time, and libfx fences out any other. The prompt request runs the turn first; it and each delivery to `/api/libfx` can run for 800 seconds, their `maxDuration`. libfx stops a turn 30 seconds before that limit, keeping what it has done so far, and a delivery to `/api/libfx` continues it, so a long turn spans several invocations.
 
-**4. Copy the stream into the transcript.** Any route following the chat, the prompt's own response or an open tab, copies libfx's stream into the transcript. A cursor check makes each line land once, however many follow. When a turn ends, the copy records its history and its design version.
+**4. Copy the stream into the transcript.** Any route following the chat, the prompt's own response or an open tab, copies libfx's stream into the transcript. A cursor check makes each line land once, however many follow. The same Redis script marks a turn running when its start lands, and when its end lands it leaves the turn's history to write, with the design the turn left. The copy then writes that history and design version to Neon, and a write that fails waits in Redis for the next copy to retry.
 
 **5. Pick up where it stopped.** On Vercel, libfx can't tell a crashed function from a slow one, so the request running a turn holds its session until its time limit. The prompt's backstop comes due 5 seconds after that limit: if the request died, the backstop takes the session over and the turn continues where its records end. In a delivery to `/api/libfx`, a process that exits has its delivery run again about a second later, and a function that stops without exiting holds its message until the queue's hold runs out, up to five minutes. The model is told the turn was interrupted, so it can check what happened before going on. A function that only stalled and wakes after that stops at its next write, so two never write at once.
 
 A tool call the crash cut off runs again only if it's safe to repeat. libfx refuses a tool that doesn't say which it is, and fx0 marks its tools in [`lib/libfx-agent.ts`](lib/libfx-agent.ts): reading the design, publishing it, fetching a page, paging through a tool result and searching the tools run again. Edits, questions and subagents don't, so the model is told those calls may have run and decides what to do. The reads start as soon as the model asks for them, while libfx saves the call.
 
-A subagent is an in-memory `createFxEngine()` inside its tool call, billed to the same chat. It has the same design tools, except that it can't start a subagent of its own.
+A subagent is an in-memory `createFxEngine()` inside its tool call, billed to the same chat. It has the same design tools, except that it can't start a subagent of its own. Its model requests count toward the parent turn's 64 steps, in a count kept in Redis ([`lib/turn-budget.ts`](lib/turn-budget.ts)), so subagents can't multiply what one turn spends. A retried or recovered request counts once.
 
 TL;DR:
 
@@ -109,7 +109,7 @@ You can watch this happen. Open session diagnostics from the header to see the c
 
 - If a prompt request crashes while it runs its turn, for example by running out of memory, the turn continues about 13 minutes after the send, however early the crash came. On Vercel, libfx can't tell a crashed function from a slow one, so a crashed request still holds the session until its 800-second limit, and the prompt's backstop takes over 5 seconds later. The page keeps showing the reply as running meanwhile. A turn that only runs long isn't affected: libfx stops it 30 seconds before the limit and queues the rest at once for a delivery to `/api/libfx`.
 - A text message sent while a tool runs, such as while a design is being written, waits for that tool before the model sees it. A message with images runs as its own turn, after any running turn finishes.
-- Paid-only chats use the latest stored user credential. Trial chats pin funding per turn; a later paid input cannot change an earlier free turn's funding. Token renewal keeps the original paid turn's billing team.
+- Every turn bills the login and team that sent the message that started it; a later message cannot change an earlier turn's funding. A text message that joins a running turn is billed to that turn. Token renewal from the same login keeps the turn's billing team.
 - Free prompts start in a new design on Opus 5.5 Fast with low effort. Existing paid-only chats keep their own billing. The allowance is five per IP across chats and browsers, with no periodic refill; clearing cookies does not reset it. After it is used, sign in to continue with your own team.
 - A design being written streams through a bounded, expiring Redis channel, so viewers on other instances can see it too. Reconnecting resumes from the full prefix; generation IDs and offsets prevent duplicated bytes. The provisional preview strips active markup and runs without scripts. Publishing or ending a turn closes its draft before it can replace the finished preview.
 - Deleting a chat removes fx0's records and credential. libfx's session data expires with the World's retention.
@@ -170,6 +170,9 @@ npm run build
 npm run test:smoke                # runs the production build with fake sessions
 npm run test:journal:integration  # needs KV_REST_API_URL/TOKEN, writes under its own prefix
 npm run test:trial:integration    # needs local redis-server/redis-cli; no remote services
+npm run test:artifact:browser     # needs local Chrome (or CHROME_PATH); checks design CSP enforcement
+npm run test:budget:integration   # needs local redis-server/redis-cli; no remote services
+npm run test:turns:integration    # needs local redis-server/redis-cli; no remote services
 ```
 
 The auth and route tests mock Vercel, AI Gateway and both databases, so check a real sign-in and real billing on a deployment.
@@ -178,7 +181,7 @@ The auth and route tests mock Vercel, AI Gateway and both databases, so check a 
 
 Generated pages run in a sandboxed iframe on an opaque origin. They can't read the app's cookies, storage or credentials, and their Content Security Policy blocks network requests (`connect-src 'none'`). It's still the browser enforcing all of this, though, not a sealed VM.
 
-Paid model requests carry the sender's OAuth token only to AI Gateway. Between requests it stays sealed in Redis and expires with the token. Sponsored requests require a recorded trial admission; the server key is never sent to a browser, cookie, journal or model prompt. Signing out deletes that login's stored credentials, revokes its token and cancels its running turns. Treat the session cookie and `SESSION_SECRET` as credentials.
+Paid model requests carry the sender's OAuth token only to AI Gateway. Between requests it stays sealed in Redis and expires with the token. Sponsored requests require a recorded trial admission; the server key is never sent to a browser, cookie, journal or model prompt. Signing out deletes that login's stored credentials and revokes its token. A running turn it funded stops at its next model request; another login's turns keep running. Treat the session cookie and `SESSION_SECRET` as credentials.
 
 ## License
 

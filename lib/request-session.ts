@@ -5,6 +5,8 @@ import { needsTokenRefresh, refreshAccessToken, sessionWithRefresh } from './aut
 import { forwardSessionCookie, grantCookieName, GRANT_COOKIE_PREFIX, isLoginId, SESSION_COOKIE_NAME } from './auth-protocol.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { getGrantFromRequest, getSessionFromRequest, isAuthenticatedSession, sealSessionCookie, type SessionCookie, type SessionData } from './secure-session.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { loginRevoked } from './turn-credential.ts'
 
 type SessionHandler = (request: Request, session: Partial<SessionData>) => Response | Promise<Response>
 
@@ -25,9 +27,13 @@ export function withRequestSession(body: SessionHandler) {
       cookies.push(...await Promise.all(obsolete.map(({ name }) => sealSessionCookie(null, name.slice(GRANT_COOKIE_PREFIX.length)))))
 
       const grant = await getGrantFromRequest(incoming)
+      // A signed-out login's grant is no session, even replayed from a copy: the
+      // request runs signed out, its grant cookie is cleared, and it never refreshes.
+      const revoked = isAuthenticatedSession(grant) && await loginRevoked(grant.loginId)
+      if (revoked) cookies.push(await sealSessionCookie(null, grant.loginId))
       let sealed: SessionCookie | undefined
       let expiresAt = grant.expiresAt ?? 0
-      if (isAuthenticatedSession(grant) && needsTokenRefresh(grant)) {
+      if (!revoked && isAuthenticatedSession(grant) && needsTokenRefresh(grant)) {
         const result = await refreshAccessToken(grant.refreshToken!)
         if (result.status === 'terminal') {
           sealed = await sealSessionCookie(null, grant.loginId)
@@ -39,7 +45,7 @@ export function withRequestSession(body: SessionHandler) {
         if (sealed) cookies.push(sealed)
       }
 
-      if (isAuthenticatedSession(grant) && expiresAt <= Date.now() && sealed?.value !== '') {
+      if (!revoked && isAuthenticatedSession(grant) && expiresAt <= Date.now() && sealed?.value !== '') {
         response = Response.json({ error: 'Authentication temporarily unavailable. Retry shortly.' }, {
           status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '5' },
         })

@@ -350,6 +350,31 @@ export function waitingLabel(
 
 // The message a status item says joined another message's running turn, which
 // no longer waits.
+// When each chat's current activity began on this device, so its counter keeps
+// counting after switching to another chat and back. A send while the chat is
+// busy keeps the first start; a chat drops its start once its activity ends.
+export type ActivityStarts = ReadonlyMap<string, number>
+
+export function startActivity(starts: ActivityStarts, chatId: string, now: number): ActivityStarts {
+  return starts.has(chatId) ? starts : new Map(starts).set(chatId, now)
+}
+
+// A draft's chat gets its ID once the server accepts its first prompt.
+export function renameActivity(starts: ActivityStarts, from: string, to: string): ActivityStarts {
+  const at = starts.get(from)
+  if (at === undefined) return starts
+  const next = new Map(starts)
+  next.delete(from)
+  return next.set(to, at)
+}
+
+export function endActivity(starts: ActivityStarts, chatId: string): ActivityStarts {
+  if (!starts.has(chatId)) return starts
+  const next = new Map(starts)
+  next.delete(chatId)
+  return next
+}
+
 export function joinedMessageId(item: StreamItem): number | null {
   return item.type === 'status' && item.id != null && item.turnId != null && item.id !== item.turnId ? item.id : null
 }

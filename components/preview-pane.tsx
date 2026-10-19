@@ -1,8 +1,14 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { designLinkUrl } from '../lib/design-link'
 import { EMPTY_DRAFT_DOCUMENT, patchDraftDocument } from '../lib/draft-preview'
+import DesignLinkDialog from './design-link-dialog'
 import { HowItWorksPanel } from './how-it-works'
+
+// After the link dialog closes, a design's asks are ignored this long: the click
+// that closed it is a fresh gesture the design could otherwise spend at once.
+const LINK_PAUSE_MS = 2000
 
 export type PreviewSource = { kind: 'design'; sessionId: string; revision: number }
 
@@ -69,9 +75,31 @@ export default function PreviewPane({
   // fires before that and swapping then showed the wrapper's white page. Documents
   // that never report (a missing revision) swap a while after loading.
   const frames = useRef<(HTMLIFrameElement | null)[]>([null, null])
+  const frontIndex = useRef(front)
+  frontIndex.current = front
+  // A link the design on screen asked to open, waiting for the user's own click.
+  const [linkRequest, setLinkRequest] = useState<string | null>(null)
+  const linksPausedUntil = useRef(0)
+  const closeLinkRequest = useCallback(() => {
+    linksPausedUntil.current = Date.now() + LINK_PAUSE_MS
+    setLinkRequest(null)
+  }, [])
+  useEffect(() => {
+    setLinkRequest(null)
+  }, [source.sessionId])
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin || event.data?.type !== 'fx0-artifact-painted') return
+      if (event.origin !== window.location.origin) return
+      if (event.data?.type === 'fx0-artifact-open') {
+        // Only the design on screen may ask, never one loading underneath; one ask
+        // at a time, and none just after the last one closed.
+        const shown = frontIndex.current == null ? null : frames.current[frontIndex.current]
+        const url = designLinkUrl(event.data.url)
+        if (!url || !shown || shown.contentWindow !== event.source || Date.now() < linksPausedUntil.current) return
+        setLinkRequest((current) => current ?? url)
+        return
+      }
+      if (event.data?.type !== 'fx0-artifact-painted') return
       const index = frames.current.findIndex((frame) => frame?.contentWindow === event.source)
       if (index >= 0) bringToFront(index)
     }
@@ -143,6 +171,7 @@ export default function PreviewPane({
       ) : (
         <div className="flex-1" />
       )}
+      <DesignLinkDialog url={linkRequest} onClose={closeLinkRequest} />
     </section>
   )
 }

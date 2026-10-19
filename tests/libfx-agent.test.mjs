@@ -11,7 +11,8 @@ const fakes = {
   libfx: dataUrl(forward('libfx', ['createFxAgent', 'createFxEngine'])),
   './journal': dataUrl(forward('journal', ['appendEvent', 'bindLibfxSession', 'chatOfLibfxSession', 'getActiveTurn'])),
   './draft-store': dataUrl(forward('drafts', ['storedDraftObserver','closeDraftCall'])),
-  './turn-credential': dataUrl(forward('credentials', ['readTurnCredential', 'readExecutionCredential'])),
+  './turn-credential': dataUrl(forward('credentials', ['readTurnCredential', 'readExecutionFunding'])),
+  './turn-budget': dataUrl(forward('budget', ['turnBudget'])),
 }
 registerHooks({ resolve(specifier, context, next) {
   if (context.parentURL?.includes('/lib/')) {
@@ -20,17 +21,28 @@ registerHooks({ resolve(specifier, context, next) {
   }
   return next(specifier, context)
 } })
-const { durableAgent, runSubagent, turnModelStep, STEP_LIMIT, SIGN_IN_AGAIN } = await import('../lib/libfx-agent.ts')
+const { durableAgent, modelStepName, runSubagent, turnModelStep, STEP_LIMIT, SIGN_IN_AGAIN } = await import('../lib/libfx-agent.ts')
 const { MAX_TURN_MODEL_STEPS } = await import('../lib/session.ts')
 
 const MODEL_URL = 'https://ai-gateway.vercel.sh/v3/ai/language-model'
 const stored = new Map()
 const executions = new Map()
+// Each turn's step names, as tests/turn-budget.integration.mjs checks the real script keeps them.
+const turnSteps = new Map()
 let agentOptions = null
 globalThis.__fx0Agent = {
   libfx: { createFxAgent: (options) => { agentOptions = options; return {} }, createFxEngine: async () => ({}) },
+  budget: {
+    turnBudget: () => ({
+      async reserve(chatId, turnId, step) {
+        const key = `${chatId}:${turnId}`
+        if (!turnSteps.has(key)) turnSteps.set(key, new Set())
+        return turnSteps.get(key).add(step).size
+      },
+    }),
+  },
   journal: {
-    chatOfLibfxSession: async (id) => ({ wrun_a: 'chat-a', wrun_b: 'chat-b' })[id] ?? null,
+    chatOfLibfxSession: async (id) => ({ wrun_a: 'chat-a', wrun_b: 'chat-b', wrun_c: 'chat-c' })[id] ?? null,
     bindLibfxSession: async (_chat, id) => id,
     emitLive: () => {},
     getActiveTurn: async () => null,
@@ -38,8 +50,10 @@ globalThis.__fx0Agent = {
   },
   credentials: {
     readTurnCredential: async (chatId) => stored.get(chatId) ?? null,
-    readExecutionCredential: async (chatId, turnId) => executions.has(chatId)
-      ? executions.get(chatId).get(turnId) ?? null : stored.get(chatId) ?? null,
+    readExecutionFunding: async (chatId, turnId) => {
+      const credential = executions.has(chatId) ? executions.get(chatId).get(turnId) ?? null : stored.get(chatId) ?? null
+      return credential ? { ok: true, credential } : { ok: false, refused: executions.has(chatId) ? 'unbound-turn' : 'unusable' }
+    },
   },
   drafts: { storedDraftObserver: async () => undefined, closeDraftCall: async () => {} },
 }
@@ -77,11 +91,16 @@ test('missing or expired execution funding cannot use a later paid credential', 
   executions.set('chat-a', new Map([[21, { ...credential('expired-token'), expiresAt: Date.now() - 1 }]]))
   t.after(() => executions.clear())
   const network = t.mock.method(globalThis, 'fetch', async () => Response.json({}))
+  const logged = t.mock.method(console, 'info', () => {})
   for (const turnId of [21, 22]) {
     agentOptions.hooks?.onEvent({ type: 'journal.restore', sessionId: 'wrun_a', data: { resumable: true, openTurnId: `m${turnId}` } })
     assert.equal((await modelRequest('wrun_a')).status, 401)
   }
   assert.equal(network.mock.callCount(), 0)
+  // Only the refusal is logged, with its turn and reason and no credential.
+  const refusals = logged.mock.calls.map((call) => JSON.parse(call.arguments[0])).filter((line) => line.event === 'funding:refused')
+  assert.deepEqual(refusals.map(({ session, turn, reason }) => [session, turn, reason]), [['chat-a', 22, 'unbound-turn']])
+  assert.ok(!logged.mock.calls.some((call) => call.arguments[0].includes('token')))
 })
 
 test('the executing turn is captured before an asynchronous chat lookup', async (t) => {
@@ -215,4 +234,59 @@ test('Gateway\'s own reason survives a rejection, scrubbed of the credential', a
   const { error } = await response.json()
   assert.equal(error.type, 'insufficient_credits')
   assert.ok(!error.message.includes('token-secret-a'))
+})
+
+test('a model request is named by its sender and conversation, so only a resend shares a name', () => {
+  const body = { prompt: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }] }
+  assert.equal(modelStepName('parent', body), modelStepName('parent', JSON.parse(JSON.stringify(body))))
+  assert.notEqual(modelStepName('parent', body), modelStepName('subagent:a', body))
+  assert.notEqual(modelStepName('parent', body), modelStepName('parent', { prompt: [...body.prompt, { role: 'assistant', content: [] }] }))
+  // Compaction can shorten a conversation to a length seen before; its content differs.
+  assert.notEqual(modelStepName('parent', { prompt: [{ role: 'user', content: 'summary' }] }), modelStepName('parent', { prompt: [{ role: 'user', content: 'go' }] }))
+  assert.equal(modelStepName('parent', {}), modelStepName('parent', null))
+  assert.match(modelStepName('parent', body), /^parent:[A-Za-z0-9_-]{22}$/)
+})
+
+test('a turn\'s subagents spend its 64 model requests with it, and a retried request counts once', async (t) => {
+  stored.set('chat-c', credential('token-c'))
+  t.after(() => { stored.delete('chat-c'); turnSteps.clear() })
+  agentOptions.onEvent({ type: 'acp.send', message: { method: 'session/prompt', params: { sessionId: 'wrun_c', _meta: { fx: { turnId: 'm51' } } } } })
+  const network = t.mock.method(globalThis, 'fetch', async () => Response.json({}))
+  // Each step's conversation is the last one plus the model's reply and its tool's result.
+  const conversation = (steps, text = 'go') => [
+    { role: 'user', content: [{ type: 'text', text }] },
+    ...Array.from({ length: steps }, (_, i) => [{ role: 'assistant', content: [{ type: 'text', text: `step ${i}` }] }, { role: 'tool', content: [] }]).flat(),
+  ]
+  for (let step = 0; step < 40; step++) assert.equal((await modelRequest('wrun_c', conversation(step))).status, 200, `parent step ${step + 1}`)
+  // libfx retrying a step, or resending it after a crash, sends the same conversation.
+  for (let retry = 0; retry < 3; retry++) assert.equal((await modelRequest('wrun_c', conversation(39))).status, 200)
+  assert.equal(turnSteps.get('chat-c:51').size, 40)
+
+  // Subagents of the same turn, each running its own conversation until refused.
+  const runs = []
+  t.mock.method(globalThis.__fx0Agent.libfx, 'createFxEngine', async (options) => ({
+    prompt: () => {
+      const result = (async () => {
+        const statuses = []
+        for (let step = 0; step < 30; step++) {
+          const response = await options.fetch(MODEL_URL, { method: 'POST', headers: { 'ai-language-model-id': options.model.id }, body: JSON.stringify({ prompt: conversation(step, 'subtask') }) })
+          statuses.push(response.status)
+          if (response.status !== 200) break
+        }
+        runs.push(statuses)
+        return { stopReason: 'end_turn' }
+      })()
+      return { result, async *[Symbol.asyncIterator]() { await result; yield { type: 'text_delta', delta: 'Child done.' } } }
+    },
+    close: async () => {},
+  }))
+  const subagent = () => runSubagent({ toolHost: async () => ({}) }, { id: 'chat-c' }, 51, 'instructions', 'task', new AbortController().signal)
+  await subagent()
+  await subagent()
+  // The first takes the 24 requests left; a second run's same conversations are its own, and none are left.
+  assert.deepEqual(runs.map((statuses) => [statuses.filter((status) => status === 200).length, statuses.at(-1)]), [[24, 400], [0, 400]])
+  const parent = await modelRequest('wrun_c', conversation(40))
+  assert.equal(parent.status, 400)
+  assert.equal((await parent.json()).error.message, STEP_LIMIT)
+  assert.equal(network.mock.callCount(), 40 + 3 + 24, 'nothing past the limit reaches the network')
 })

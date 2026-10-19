@@ -2,6 +2,7 @@ import { DESIGN_ARTIFACT_EMBEDDED_CSP, prepareDesignArtifactHtml } from '../../.
 import { readDesignArtifactAt } from '../../../lib/journal'
 import { readGeneration } from '../../../lib/history'
 import { withSessionRoute } from '../../../lib/route-auth'
+import { log } from '../../../lib/session'
 
 export const maxDuration = 30
 
@@ -22,11 +23,15 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
     return new Response(null, { status: 304, headers: { 'cache-control': 'private, no-cache', etag } })
   }
   const readyToken = crypto.randomUUID()
-  const preparedArtifact = artifact == null
-    ? `<!doctype html><html><head><meta charset="utf-8"><title>No design artifact</title></head><body><p>${
-      past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
+  const prepared = artifact == null ? null : prepareDesignArtifactHtml(artifact, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
+  // Every stored design passed validation, so this only guards against one that
+  // somehow lacks a doctype: it is never shown without its CSP.
+  if (artifact != null && prepared == null) log(sessionId, 'artifact:unrenderable', { revision: past ? revision : live!.revision })
+  const preparedArtifact = prepared ??
+    `<!doctype html><html><head><meta charset="utf-8"><title>No design artifact</title></head><body><p>${
+      artifact != null ? 'This design could not be prepared for preview.'
+        : past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
     }</p></body></html>`
-    : prepareDesignArtifactHtml(artifact, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
   const artifactUrl = `data:text/html;base64,${Buffer.from(preparedArtifact, 'utf8').toString('base64')}`
   const csp = [
     "default-src 'none'",
@@ -72,13 +77,11 @@ addEventListener('message',event=>{
   // The design paints in its own process, after this wrapper's load event; the app
   // swaps a new revision on screen only once it has.
   if(event.data.type==='painted')parent.postMessage({type:'fx0-artifact-painted'},location.origin);
-  // The design cannot open popups itself; a clicked https link is opened here, without
-  // an opener, and only during the click's user activation (it propagates to this frame).
+  // The design can only ask to open a link: its scripts can read the token and send
+  // this at any time. The app shows the address and opens it on the user's own click
+  // there. Recent user activation only filters out asks nobody prompted; it is not proof.
   if(event.data.type==='open'&&typeof event.data.url==='string'&&navigator.userActivation?.isActive!==false){
-    try{
-      const url=new URL(event.data.url);
-      if(url.protocol==='https:'&&!url.username&&!url.password)window.open(url.href,'_blank','noopener,noreferrer');
-    }catch{}
+    parent.postMessage({type:'fx0-artifact-open',url:event.data.url},location.origin);
   }
 });
 frame.addEventListener('load',()=>setTimeout(()=>{

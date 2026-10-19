@@ -55,6 +55,43 @@ test('installed libfx dispatch uses the user-scoped transport rather than a shar
   }
 })
 
+test('installed libfx rebinds a running turn the session cap evicted before its next model request', { timeout: 10_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'fx0-binding-'))
+  const drafts = createDraftContext()
+  const seen = []
+  const sse = (...items) => new Response([...items.map((item) => `data: ${JSON.stringify(item)}`), 'data: [DONE]', ''].join('\n\n'),
+    { headers: { 'content-type': 'text/event-stream' } })
+  const finish = (reason) => ({ type: 'finish', finishReason: { unified: reason, raw: reason }, usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } } })
+  const fetcher = async (_url, init = {}) => {
+    if ((init.method ?? 'GET') === 'GET') return Response.json({ data: [{ id: 'sdk/binding-model', type: 'language' }] })
+    seen.push(drafts.turn(new Headers(init.headers).get('x-session-id')))
+    return seen.length === 1
+      ? sse({ type: 'tool-call', toolCallId: 'wait-1', toolName: 'wait_for_answer', input: '{}' }, finish('tool-calls'))
+      : sse({ type: 'text-delta', id: 'answer', delta: 'Done.' }, finish('stop'))
+  }
+  // While the turn waits in its tool, 250 other sessions start turns in this
+  // process, past the 200-session cap.
+  const crowd = async () => {
+    for (let i = 0; i < 250; i++) {
+      drafts.observe({ type: 'acp.send', message: { method: 'session/prompt', params: { sessionId: `other-${i}`, _meta: { fx: { turnId: `m${1000 + i}` } } } } })
+    }
+    return 'Answered.'
+  }
+  let agent
+  try {
+    agent = createFxAgent({ durability: local({ dir }), apiKey: 'synthetic-binding-key', model: 'sdk/binding-model', instructions: 'Reply briefly.', fetch: fetcher,
+      tools: [{ name: 'wait_for_answer', description: 'Wait for an answer.', inputSchema: { type: 'object', properties: {} }, idempotent: true, execute: crowd }],
+      onEvent: (event) => drafts.observe(event), hooks: { onEvent: (event) => drafts.observe(event) } })
+    const turn = agent.session().prompt('Ask me', { messageId: 'm31', signal: AbortSignal.timeout(5_000) })
+    try { for await (const _event of turn) {} } catch {}
+    assert.equal((await turn.result).stopReason, 'end_turn')
+    assert.deepEqual(seen, [31, 31], 'the request after the wait still names its own turn')
+  } finally {
+    await agent?.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('installed libfx restores the original turn before its first recovered model request', { timeout: 10_000 }, async () => {
   const persistence = createMemoryPersistence()
   let first

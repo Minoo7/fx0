@@ -41,6 +41,11 @@ export function createSessionEventStream(sessionId: string, options: EventStream
 
   return new ReadableStream<string>({
     start(controller) {
+      // Every write goes through here, so nothing is written once the stream has
+      // stopped: a closed or cancelled controller throws on enqueue.
+      const send = (chunk: string) => {
+        if (!stopped) controller.enqueue(chunk)
+      }
       const close = () => {
         if (stopped) return
         stopTimers()
@@ -55,12 +60,24 @@ export function createSessionEventStream(sessionId: string, options: EventStream
         }
         if (item.type === 'turn_start') running = true
         if (item.type === 'done' || item.type === 'error') running = false
-        controller.enqueue(`id: ${item.seq ?? ''}\ndata: ${JSON.stringify(item)}\n\n`)
+        send(`id: ${item.seq ?? ''}\ndata: ${JSON.stringify(item)}\n\n`)
         if (options.closeWhen?.(item)) {
           close()
           return true
         }
         return false
+      }
+      // A failed journal read ends the stream with an error line, unless the stream
+      // already ended while the read was pending: the client left, or a terminal
+      // item closed it.
+      const fail = (error: unknown) => {
+        if (stopped) return
+        send(`data: ${JSON.stringify({ type: 'error', text: `event journal unavailable: ${String((error as Error)?.message ?? error)}` })}\n\n`)
+        close()
+      }
+      // Every poll starts here, so no poll's failure goes unhandled.
+      const pollSoon = () => {
+        void poll().catch(fail)
       }
       const poll = async () => {
         if (stopped) return
@@ -83,22 +100,16 @@ export function createSessionEventStream(sessionId: string, options: EventStream
             deliver(draft.item)
           }
           pollDelayMs = items.length > 0 || draft ? 100 : Math.min(running ? 150 : options.maxIdleMs ?? 1000, Math.ceil(pollDelayMs * 1.5))
-        } catch (error) {
-          controller.enqueue(
-            `data: ${JSON.stringify({ type: 'error', text: `event journal unavailable: ${String((error as Error)?.message ?? error)}` })}\n\n`,
-          )
-          close()
-          return
         } finally {
           polling = false
         }
         if (stopped) return
         if (pollAgain) {
           pollAgain = false
-          void poll()
+          pollSoon()
           return
         }
-        pollTimer = setTimeout(poll, pollDelayMs)
+        pollTimer = setTimeout(pollSoon, pollDelayMs)
       }
 
       // Same-process commits arrive here as they land. The next item in sequence is
@@ -110,21 +121,19 @@ export function createSessionEventStream(sessionId: string, options: EventStream
           deliver(item)
           pollDelayMs = 100
         } else {
-          void poll()
+          pollSoon()
         }
       }
       localEvents.on(sessionId, onLocal)
       // A local write wakes the shared reader; bytes always come from the store,
       // with its generation and offset, just as they do on another instance.
       onLive = (item) => {
-        if (!stopped && item.type === 'design_draft') void poll()
+        if (!stopped && item.type === 'design_draft') pollSoon()
       }
       localEvents.on(`${sessionId}:live`, onLive)
 
-      void poll()
-      heartbeat = setInterval(() => {
-        if (!stopped) controller.enqueue(': ping\n\n')
-      }, 15_000)
+      pollSoon()
+      heartbeat = setInterval(() => send(': ping\n\n'), 15_000)
       if (options.wake) {
         options.wake()
         wakeTimer = setInterval(options.wake, 5_000)
