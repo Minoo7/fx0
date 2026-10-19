@@ -1834,7 +1834,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
                   }
                   return (
                     <h1 className="min-w-0 text-sm font-medium tracking-[-0.01em]">
-                      <Popover open={chatMenuOpen} onOpenChange={toggleChatMenu}>
+                      <Popover modal open={chatMenuOpen} onOpenChange={toggleChatMenu}>
                         <PopoverTrigger asChild>
                           <button
                             type="button"

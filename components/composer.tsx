@@ -942,6 +942,7 @@ export default function Composer({
                 <span className="truncate">Opus 5.5 Fast</span>
               </Button>
             ) : <Popover
+              modal
               open={modelPickerOpen}
               onOpenChange={(open) => {
                 setModelPickerOpen(trial ? false : open)
@@ -1145,6 +1146,7 @@ export default function Composer({
                   }}
                 />
                 <Popover
+                  modal
                   open={designPickerOpen}
                   onOpenChange={(open) => {
                     setAttachOpen(open)
