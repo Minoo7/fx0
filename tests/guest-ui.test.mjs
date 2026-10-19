@@ -247,6 +247,29 @@ test('an exhausted trial says so briefly and its Sign in opens the dialog', asyn
   assert.equal(app.dialog().open, true)
 })
 
+test('stop says when there was no reply to stop, rather than claiming a stop was requested', async (t) => {
+  t.mock.method(console, 'info', () => {})
+  let answer = { cancelled: false }
+  const ui = browser(t, {
+    '/api/events?session=trial-chat&after=2': () => new Response(''),
+    '/api/cancel?session=trial-chat': () => Response.json(answer),
+  })
+  const app = mount(t, ui, {
+    ...guestBoot, user: trialUser, sessionId: 'trial-chat', freePrompts: 4,
+    events: [{ type: 'user', seq: 1, id: 1, text: 'Earlier prompt' }, { type: 'text', seq: 2, id: 1, delta: 'Earlier answer' }],
+  })
+  const announced = async () => {
+    find(app.tree(), (node) => node.type === Composer).props.onStop()
+    await tick()
+    app.render()
+    return find(app.tree(), (node) => node.props?.role === 'status' && node.props['aria-live'] === 'polite').props.children
+  }
+  assert.equal(await announced(), 'There\'s no reply to stop.')
+  answer = { cancelled: true }
+  assert.equal(await announced(), 'Stop requested.')
+  assert.equal(ui.requests.filter(({ url, init }) => url === '/api/cancel?session=trial-chat' && init?.method === 'POST').length, 2)
+})
+
 test('signed-in non-trial model settings explain team billing rather than claiming a free prompt', async (t) => {
   const ui = browser(t)
   const app = mount(t, ui, { ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null }, sessionId: 'draft', freePrompts: 5 })

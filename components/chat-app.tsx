@@ -1428,7 +1428,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     try {
       const response = await fetchUi(`/api/cancel?session=${encodeURIComponent(sessionId)}`, { method: 'POST' })
       if (!response.ok) throw new Error(`Stop request failed with ${response.status}`)
-      setInteractionNotice({ tone: 'status', text: 'Stop requested.' })
+      const { cancelled } = (await response.json()) as { cancelled?: boolean }
+      setInteractionNotice({ tone: 'status', text: cancelled ? 'Stop requested.' : 'There\'s no reply to stop.' })
     } catch (error) {
       if (error instanceof AuthRouteError) return
       console.error('[fx0] stop failed', { sessionId, error })

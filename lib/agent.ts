@@ -275,11 +275,14 @@ export function followChat(host: SessionState, { idleMs = 20_000, signal }: { id
   return follow
 }
 
+// libfx knows which turn is open; fx0's running marker can lag it or outlive its
+// TTL. So a cancel always goes to libfx, which stops the turn open when it lands
+// and ignores it when none is. False only for a chat no prompt has reached libfx for.
 export async function cancelCurrent(host: SessionState): Promise<boolean> {
   const [active, stored] = await Promise.all([getActiveTurn(host.id), readSession(host.id)])
-  if (!active || !stored?.libfxSessionId) return false
+  if (!stored?.libfxSessionId) return false
   await agent().session(stored.libfxSessionId).cancel()
-  log(host.id, 'turn:cancel', { turn: active.id })
+  log(host.id, 'turn:cancel', { turn: active?.id ?? null })
   return true
 }
 

@@ -466,13 +466,19 @@ test('ask_user_question waits for the open question\'s answer and rejects answer
   assert.equal(f.events.at(-1).cancelled, true)
 })
 
-test('cancel stops the running libfx turn, and does nothing when the chat is idle', async (t) => {
+test('cancel always reaches libfx, even when fx0 has no running turn on record', async (t) => {
   const f = fixture(t, { libfxSessionId: 'wrun_9' })
   const host = boundHost('cancel-chat')
-  assert.equal(await runtime.cancelCurrent(host), false)
+  // No marker: its turn_start may not be projected yet, or the turn outlived the
+  // marker's TTL. libfx stops whatever turn is open, and ignores it if none is.
+  assert.equal(await runtime.cancelCurrent(host), true)
   f.setActive({ id: 3 })
   assert.equal(await runtime.cancelCurrent(host), true)
-  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [['cancel', 'wrun_9']])
+  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [['cancel', 'wrun_9'], ['cancel', 'wrun_9']])
+  // A chat no prompt has reached libfx for has nothing to cancel.
+  f.stored = { ...f.stored, libfxSessionId: null }
+  assert.equal(await runtime.cancelCurrent(host), false)
+  assert.equal(f.calls.filter((call) => call[0] === 'cancel').length, 2)
 })
 
 test('sign-out drops only this login\'s chat credentials and cancels no turn', async (t) => {
