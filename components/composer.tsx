@@ -726,6 +726,10 @@ export default function Composer({
   }
 
   const effortOptions = trial ? [] : efforts[resolvedModel ?? ''] ?? []
+  const cycleEffort = () => {
+    const values = ['', ...effortOptions]
+    void chooseEffort(values[(values.indexOf(effort) + 1) % values.length])
+  }
 
   const normalizedModelQuery = modelQuery.trim().toLowerCase()
   const queryTokens = normalizedModelQuery.split(/\s+/).map(squash).filter(Boolean)
@@ -1037,11 +1041,17 @@ export default function Composer({
                           onPointerDown={(event) => {
                             event.preventDefault()
                             event.stopPropagation()
-                            const values = ['', ...effortOptions]
-                            const next = values[(values.indexOf(effort) + 1) % values.length]
-                            void chooseEffort(next)
+                            cycleEffort()
                           }}
-                          className="shrink-0 font-mono text-xs text-foreground-tertiary hover:text-foreground"
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter' && event.key !== ' ') return
+                            event.preventDefault()
+                            event.stopPropagation()
+                            cycleEffort()
+                          }}
+                          // As wide as the longest level, so cycling never pulls the target out from under the pointer.
+                          style={{ width: `calc(${Math.max(DEFAULT_EFFORT_LABEL.length, ...effortOptions.map((option) => option.length))}ch + 0.5rem)` }}
+                          className="-my-1 shrink-0 px-1 py-1 text-right font-mono text-xs text-foreground-tertiary outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           {effort || DEFAULT_EFFORT_LABEL}
                         </span>
