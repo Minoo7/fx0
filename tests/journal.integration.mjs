@@ -287,8 +287,8 @@ test('journal Redis integration uses isolated durable session state', async (t) 
         userId: 'user-a', loginId, loginAt: 1, email: 'a@example.com', accessToken, teamId: 'team_a',
         expiresAt: Date.now() + 120_000, isLoggedIn: true, refreshToken: 'refresh-never-stored',
       })
-      await credentials.saveTurnCredential('cred-laptop', session('login-laptop', 'access-laptop-secret'))
-      await credentials.saveTurnCredential('cred-phone', session('login-phone', 'access-phone-secret'))
+      await credentials.saveTurnCredential('cred-laptop', session('login-laptop', 'access-laptop-secret'), 1)
+      await credentials.saveTurnCredential('cred-phone', session('login-phone', 'access-phone-secret'), 1)
       const raw = await redis.get(`${prefix}:credential:cred-laptop`)
       assert.equal(typeof raw, 'string')
       assert.ok(!raw.includes('access-laptop-secret') && !raw.includes('refresh-never-stored'), 'sealed, never plaintext')
@@ -303,10 +303,12 @@ test('journal Redis integration uses isolated durable session state', async (t) 
       assert.equal(await credentials.readTurnCredential('cred-laptop'), null, 'another secret cannot unseal it')
       process.env.SESSION_SECRET = secret
 
-      assert.deepEqual(await credentials.dropLoginCredentials('login-laptop'), ['cred-laptop'])
+      assert.deepEqual(await credentials.dropLoginCredentials('login-laptop'), [{ chatId: 'cred-laptop', latestWasLogin: true }])
       assert.equal(await credentials.readTurnCredential('cred-laptop'), null)
+      assert.equal((await credentials.readExecutionFunding('cred-laptop', 1)).ok, false)
+      assert.equal((await credentials.readTurnFunding('cred-laptop', 1))?.loginId, 'login-laptop', 'sign-out keeps the funding record')
       assert.equal((await credentials.readTurnCredential('cred-phone'))?.accessToken, 'access-phone-secret')
-      await credentials.saveTurnCredential('cred-expired', { ...session('login-x', 'x'), expiresAt: Date.now() - 1 })
+      await assert.rejects(credentials.saveTurnCredential('cred-expired', { ...session('login-x', 'x'), expiresAt: Date.now() - 1 }, 1), /Sign in again/)
       assert.equal(await credentials.readTurnCredential('cred-expired'), null, 'an expired token is never stored')
     })
   } finally {

@@ -11,7 +11,7 @@ const fakes = {
   libfx: dataUrl(forward('libfx', ['createFxAgent', 'createFxEngine'])),
   './journal': dataUrl(forward('journal', ['appendEvent', 'bindLibfxSession', 'chatOfLibfxSession', 'getActiveTurn'])),
   './draft-store': dataUrl(forward('drafts', ['storedDraftObserver','closeDraftCall'])),
-  './turn-credential': dataUrl(forward('credentials', ['readTurnCredential', 'readExecutionCredential'])),
+  './turn-credential': dataUrl(forward('credentials', ['readTurnCredential', 'readExecutionFunding'])),
 }
 registerHooks({ resolve(specifier, context, next) {
   if (context.parentURL?.includes('/lib/')) {
@@ -38,8 +38,10 @@ globalThis.__fx0Agent = {
   },
   credentials: {
     readTurnCredential: async (chatId) => stored.get(chatId) ?? null,
-    readExecutionCredential: async (chatId, turnId) => executions.has(chatId)
-      ? executions.get(chatId).get(turnId) ?? null : stored.get(chatId) ?? null,
+    readExecutionFunding: async (chatId, turnId) => {
+      const credential = executions.has(chatId) ? executions.get(chatId).get(turnId) ?? null : stored.get(chatId) ?? null
+      return credential ? { ok: true, credential } : { ok: false, refused: executions.has(chatId) ? 'unbound-turn' : 'unusable' }
+    },
   },
   drafts: { storedDraftObserver: async () => undefined, closeDraftCall: async () => {} },
 }
@@ -77,11 +79,16 @@ test('missing or expired execution funding cannot use a later paid credential', 
   executions.set('chat-a', new Map([[21, { ...credential('expired-token'), expiresAt: Date.now() - 1 }]]))
   t.after(() => executions.clear())
   const network = t.mock.method(globalThis, 'fetch', async () => Response.json({}))
+  const logged = t.mock.method(console, 'info', () => {})
   for (const turnId of [21, 22]) {
     agentOptions.hooks?.onEvent({ type: 'journal.restore', sessionId: 'wrun_a', data: { resumable: true, openTurnId: `m${turnId}` } })
     assert.equal((await modelRequest('wrun_a')).status, 401)
   }
   assert.equal(network.mock.callCount(), 0)
+  // Only the refusal is logged, with its turn and reason and no credential.
+  const refusals = logged.mock.calls.map((call) => JSON.parse(call.arguments[0])).filter((line) => line.event === 'funding:refused')
+  assert.deepEqual(refusals.map(({ session, turn, reason }) => [session, turn, reason]), [['chat-a', 22, 'unbound-turn']])
+  assert.ok(!logged.mock.calls.some((call) => call.arguments[0].includes('token')))
 })
 
 test('the executing turn is captured before an asynchronous chat lookup', async (t) => {

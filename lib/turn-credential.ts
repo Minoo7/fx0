@@ -7,11 +7,11 @@ import { trialEnabled, type TrialCredential } from './trial.ts'
 
 // libfx runs a chat's turns in queue deliveries, with no user request to read a
 // cookie from. So the prompt route leaves the sender's AI Gateway credential
-// here, and the agent's fetch bills every model request of that chat to it:
-// the access token and team only, sealed with SESSION_SECRET and expiring with
-// the token. The refresh token never leaves the cookie, and nothing here is
-// logged. Deleting this module, and the fetch that reads it, bills the
-// deployment instead.
+// here, pinned to the turn its message starts, and the agent's fetch bills each
+// model request to its turn's credential: the access token and team only,
+// sealed with SESSION_SECRET and expiring with the token. The refresh token
+// never leaves the cookie, and no credential is logged. Deleting this module,
+// and the fetch that reads it, bills the deployment instead.
 interface UserTurnCredential {
   userId: string
   loginId: string
@@ -48,21 +48,38 @@ async function activeCredential<T extends TurnCredential>(credential: T | null):
   return credential && !await loginRevoked(credential.loginId) ? credential : null
 }
 
-interface FundingBinding { kind: 'trial' | 'user'; userId: string; loginId: string; teamId?: string }
+export interface FundingBinding { kind: 'trial' | 'user'; userId: string; loginId: string; teamId?: string }
 
-// Stores the credential that bills `chatId` from now on. A credential that has
-// already expired is not stored.
-export async function saveTurnCredential(chatId: string, session: SessionData, turnId?: number): Promise<void> {
+// Pins the sender's credential to the turn its message starts, and keeps it as
+// the chat's latest credential for token renewal. Every paid message is pinned;
+// one whose credential can't be stored is not admitted.
+export async function saveTurnCredential(chatId: string, session: SessionData, turnId: number): Promise<void> {
+  const stored = userCredential(session)
+  if (!stored) throw new Error('Sign in again to send this message')
+  await storeCredential(chatId, stored.credential, stored.ttlSeconds, turnId)
+}
+
+// A renewed token for the chat's latest credential. It reaches the turns its
+// login funded, each still billing its own team, and pins no turn. An expired
+// token is not stored.
+export async function renewLatestCredential(chatId: string, session: SessionData): Promise<void> {
+  const stored = userCredential(session)
+  if (stored) await storeCredential(chatId, stored.credential, stored.ttlSeconds)
+}
+
+function userCredential(session: SessionData): { credential: UserTurnCredential; ttlSeconds: number } | null {
   const ttlSeconds = Math.floor((session.expiresAt - Date.now()) / 1000)
-  if (!session.accessToken || !session.teamId || !session.loginId || ttlSeconds <= 0) return
-  const credential: UserTurnCredential = {
-    userId: session.userId,
-    loginId: session.loginId,
-    accessToken: session.accessToken,
-    teamId: session.teamId,
-    expiresAt: session.expiresAt,
+  if (!session.accessToken || !session.teamId || !session.loginId || ttlSeconds <= 0) return null
+  return {
+    credential: {
+      userId: session.userId,
+      loginId: session.loginId,
+      accessToken: session.accessToken,
+      teamId: session.teamId,
+      expiresAt: session.expiresAt,
+    },
+    ttlSeconds,
   }
-  await storeCredential(chatId, credential, ttlSeconds, turnId)
 }
 
 export async function saveTrialCredential(chatId: string, credential: TrialCredential, turnId: number): Promise<void> {
@@ -79,8 +96,8 @@ async function storeCredential(chatId: string, credential: TurnCredential, ttlSe
   const sealed = await sealData(credential, { password: password(), ttl: ttlSeconds })
   const pipeline = redis().pipeline()
   const sponsored = 'kind' in credential
-  // Latest OAuth grants still serve token renewal and old paid-only chats.
-  // A sponsored admission never replaces that user's credential.
+  // The latest user credential serves token renewal, and the chats whose turns
+  // predate funding records. A sponsored admission never replaces it.
   if (!sponsored) pipeline.set(credentialKey(chatId), sealed, { ex: ttlSeconds })
   if (turnId !== undefined) {
     const binding: FundingBinding = { kind: sponsored ? 'trial' : 'user', userId: credential.userId,
@@ -127,53 +144,81 @@ function fundingBinding(value: unknown): FundingBinding | null {
   } catch { return null }
 }
 
-// The SDK's actual executing message selects funding, including after a cold
-// restore. Redis projection timing and later submitted messages confer no billing
-// authority. Legacy fallback exists only where no explicit turn records exist.
-export async function readExecutionCredential(chatId: string, turnId?: number): Promise<TurnCredential | null> {
-  // Check after selecting the credential, including old records and exact-turn
-  // fallbacks. Never cache a negative revocation check across model requests.
-  return activeCredential(await storedExecutionCredential(chatId, turnId))
+// Why a model request has no funding: the executing turn is unknown, it has no
+// funding record in a chat that keeps them, its credential is gone, expired or
+// no longer matches its record, or its login has signed out.
+export type FundingRefusal = 'no-turn' | 'unbound-turn' | 'unusable' | 'revoked'
+export type ExecutionFunding = { ok: true; credential: TurnCredential } | { ok: false; refused: FundingRefusal }
+
+const refuse = (refused: FundingRefusal): ExecutionFunding => ({ ok: false, refused })
+
+// What funds a turn's model request, from the chat's records alone. A turn with
+// a funding record bills that record's user, login and team, or nothing: later
+// messages and renewals can change only the token. A chat with no records at
+// all predates per-turn funding and bills its latest user credential.
+export function resolveFunding(
+  records: number,
+  turnId: number | null,
+  binding: FundingBinding | null,
+  exact: TurnCredential | null,
+  latest: TurnCredential | null,
+): ExecutionFunding {
+  if (records === 0) return latest && !('kind' in latest) ? { ok: true, credential: latest } : refuse('unusable')
+  if (turnId === null) return refuse('no-turn')
+  if (!binding) return refuse('unbound-turn')
+  const sameLogin = (credential: TurnCredential | null) =>
+    credential?.userId === binding.userId && credential.loginId === binding.loginId
+  if (binding.kind === 'trial') return exact && 'kind' in exact && sameLogin(exact) ? { ok: true, credential: exact } : refuse('unusable')
+  // Rotation may change the selected team, but this turn retains the team its
+  // admission selected. The refreshed OAuth token is usable only for that team.
+  if (latest && !('kind' in latest) && sameLogin(latest)) return { ok: true, credential: { ...latest, teamId: binding.teamId! } }
+  return exact && !('kind' in exact) && sameLogin(exact) && exact.teamId === binding.teamId
+    ? { ok: true, credential: exact } : refuse('unusable')
 }
 
-async function storedExecutionCredential(chatId: string, turnId?: number): Promise<TurnCredential | null> {
-  const validTurn = Number.isSafeInteger(turnId) && (turnId as number) > 0
+// The SDK's actual executing message selects funding, including after a cold
+// restore. Redis projection timing and later submitted messages confer no billing
+// authority. A signed-out login's credential funds nothing: the check runs after
+// selection, on every request, and is never cached.
+export async function readExecutionFunding(chatId: string, turnId?: number): Promise<ExecutionFunding> {
+  const turn = Number.isSafeInteger(turnId) && (turnId as number) > 0 ? turnId as number : null
   const pipeline = redis().pipeline().hlen(fundingKey(chatId)).get(credentialKey(chatId))
-  if (validTurn) pipeline.hget(fundingKey(chatId), String(turnId)).get(turnCredentialKey(chatId, turnId!))
+  if (turn !== null) pipeline.hget(fundingKey(chatId), String(turn)).get(turnCredentialKey(chatId, turn))
   const values: unknown[] = await pipeline.exec()
   const [count, latestSeal, bindingValue, turnSeal] = values
-  const latest = await decodeCredential(latestSeal)
-  if (Number(count) === 0) return latest && !('kind' in latest) ? latest : null
-  if (!validTurn) return null
-  const binding = fundingBinding(bindingValue)
-  if (!binding) return null
-  const exact = await decodeCredential(turnSeal)
-  if (binding.kind === 'trial') return exact && 'kind' in exact && exact.userId === binding.userId && exact.loginId === binding.loginId ? exact : null
-  if (latest && !('kind' in latest) && latest.userId === binding.userId && latest.loginId === binding.loginId) {
-    // Rotation may change the selected team, but this turn retains the team its
-    // admission selected. The refreshed OAuth token is usable only for that team.
-    return { ...latest, teamId: binding.teamId! }
-  }
-  return exact && !('kind' in exact) && exact.userId === binding.userId && exact.loginId === binding.loginId && exact.teamId === binding.teamId ? exact : null
+  const [latest, exact] = await Promise.all([decodeCredential(latestSeal), decodeCredential(turnSeal)])
+  const funding = resolveFunding(Number(count), turn, fundingBinding(bindingValue), exact, latest)
+  return funding.ok && await loginRevoked(funding.credential.loginId) ? refuse('revoked') : funding
 }
+
+// A turn's funding record. Sign-out deletes credentials, never these records.
+export async function readTurnFunding(chatId: string, turnId: number): Promise<FundingBinding | null> {
+  return fundingBinding(await redis().hget(fundingKey(chatId), String(turnId)))
+}
+
+// A chat whose credentials a sign-out dropped, and whether the chat's latest
+// credential was that login's.
+export interface DroppedChat { chatId: string; latestWasLogin: boolean }
 
 // Sign-out: removes every chat credential this login stored, but not one a later
 // prompt from another login of the user has since replaced.
-export async function dropLoginCredentials(loginId: string): Promise<string[]> {
+export async function dropLoginCredentials(loginId: string): Promise<DroppedChat[]> {
   const chats = (await redis().smembers(loginKey(loginId))) ?? []
   // One round trip reads every chat's credential and funding; a second deletes.
+  // The seal is decoded directly: sign-out has already revoked this login.
   const pipeline = redis().pipeline()
   for (const chatId of chats) pipeline.get(credentialKey(chatId)).hgetall(fundingKey(chatId))
   const values: unknown[] = chats.length ? await pipeline.exec() : []
   const keys: string[] = []
-  const dropped: string[] = []
+  const dropped: DroppedChat[] = []
   await Promise.all(chats.map(async (chatId, index) => {
     const credential = await decodeCredential(values[index * 2])
     const bindings = (values[index * 2 + 1] ?? {}) as Record<string, unknown>
     const owned = Object.entries(bindings).filter(([, value]) => fundingBinding(value)?.loginId === loginId)
       .map(([id]) => turnCredentialKey(chatId, Number(id)))
-    if (credential && !('kind' in credential) && credential.loginId === loginId) owned.push(credentialKey(chatId))
-    if (owned.length) { keys.push(...owned); dropped.push(chatId) }
+    const latestWasLogin = !!credential && !('kind' in credential) && credential.loginId === loginId
+    if (latestWasLogin) owned.push(credentialKey(chatId))
+    if (owned.length) { keys.push(...owned); dropped.push({ chatId, latestWasLogin }) }
   }))
   await redis().del(...keys, loginKey(loginId))
   return dropped

@@ -14,7 +14,7 @@ import {
   type TurnSettings,
 } from './journal'
 import { recordGeneration, recordTurn } from './history'
-import { readExecutionCredential } from './turn-credential'
+import { readExecutionFunding } from './turn-credential'
 import { effectiveEffort, effectiveFast, effectiveModel, INSTANCE, log, type SessionState } from './session'
 import type { StreamItem } from './events'
 import { TRIAL_MODEL } from './trial-policy'
@@ -127,7 +127,8 @@ function turnSettings(host: SessionState, sponsored: boolean): TurnSettings {
 }
 
 async function startTurn(host: SessionState, id: number, input: string | undefined, startSeq: number): Promise<void> {
-  const [credential] = await Promise.all([readExecutionCredential(host.id, id), readSettings(host)])
+  const [funding] = await Promise.all([readExecutionFunding(host.id, id), readSettings(host)])
+  const credential = funding.ok ? funding.credential : null
   const sponsored = !!credential && 'kind' in credential
   const turn: ActiveTurn = {
     id,

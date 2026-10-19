@@ -3,7 +3,15 @@ import { createTools, type AskQuestion, type ToolHost } from './tools'
 import { assertGenerationCredential } from './gateway-session'
 import { chatSession, durableAgent, runSubagent, type ChatRuntime } from './libfx-agent'
 import { project } from './projector'
-import { dropChatCredential, dropLoginCredentials, readTurnCredential, saveTurnCredential, saveTrialCredential } from './turn-credential'
+import {
+  dropChatCredential,
+  dropLoginCredentials,
+  readTurnCredential,
+  readTurnFunding,
+  renewLatestCredential,
+  saveTrialCredential,
+  saveTurnCredential,
+} from './turn-credential'
 import type { TrialCredential } from './trial'
 import type { SessionData } from './secure-session'
 import {
@@ -211,8 +219,10 @@ export async function submitPrompt(
   log(host.id, 'prompt:submitted', { id: submitted.id, clientId, imageCount: images?.length ?? 0, idle: submitted.idle })
   const id = submitted.id
   try {
+    // Pinned before libfx sees the message: whether it starts a turn or joins
+    // the running one, no turn can run without its funding record.
     if (funding) await saveTrialCredential(host.id, funding, id)
-    else await saveTurnCredential(host.id, sender!, submitted.trialChat ? id : undefined)
+    else await saveTurnCredential(host.id, sender!, id)
     const stored = await hydrateSession(host)
     const { session } = await chatSession(agent(), host, stored?.libfxSessionId ?? null, agentInstructions(host), id, !!funding)
     const input = images?.length ? [{ type: 'text' as const, text: `[${author}] ${text}` }, ...images] : `[${author}] ${text}`
@@ -235,14 +245,15 @@ export async function submitPrompt(
   return { id, seq: submitted.event.seq ?? 0, trialChat: submitted.trialChat }
 }
 
-// A token the same login renewed for the same team reaches the chat's running
-// and queued turns. Another login or team bills only from its own next prompt.
+// A token the same login renewed for the same team reaches that login's running
+// and queued turns, each billing the team its message chose. Another login or
+// team bills only from its own next prompt.
 export async function renewTurnCredential(host: SessionState): Promise<void> {
   const session = host.gatewaySession
   if (!session) return
   const stored = await readTurnCredential(host.id)
   if (stored?.loginId === session.loginId && stored.teamId === session.teamId && session.expiresAt > stored.expiresAt) {
-    await saveTurnCredential(host.id, session)
+    await renewLatestCredential(host.id, session)
   }
 }
 
@@ -420,10 +431,11 @@ export async function deleteDesignSession(host: SessionState): Promise<boolean> 
 }
 
 /**
- * Sign-out deletes the chat credentials this login stored, then cancels those
- * chats' turns. A turn that still reaches the model finds no credential and
- * ends with "sign in again"; nothing falls back to another login or the
- * deployment.
+ * Sign-out deletes the chat credentials this login stored, then cancels the
+ * running turns this login funded. A turn another login funded keeps running
+ * on its own credential. A turn of this login that still reaches the model
+ * finds no credential and ends with "sign in again"; nothing falls back to
+ * another login or the deployment.
  */
 export async function cancelUserRuntime(userId: string, loginId?: string): Promise<void> {
   for (const host of registry().values()) {
@@ -432,9 +444,16 @@ export async function cancelUserRuntime(userId: string, loginId?: string): Promi
   // A session without a login id never stored a chat credential.
   if (!loginId) return
   const chats = await dropLoginCredentials(loginId)
-  await Promise.all(chats.map(async (chatId) => {
+  await Promise.all(chats.map(async ({ chatId, latestWasLogin }) => {
     const [active, stored] = await Promise.all([getActiveTurn(chatId), readSession(chatId)])
-    if (active && stored?.libfxSessionId) await agent().session(stored.libfxSessionId).cancel().catch(() => {})
+    if (!active || !stored?.libfxSessionId) return
+    // Only a turn this login's own message funded stops. A turn with no funding
+    // record can bill at most the chat's latest credential, so it stops when
+    // that credential was this login's.
+    const funding = await readTurnFunding(chatId, active.id)
+    const stops = funding ? funding.loginId === loginId : latestWasLogin
+    log(chatId, 'signout:turn', { turn: active.id, cancelled: stops })
+    if (stops) await agent().session(stored.libfxSessionId).cancel().catch(() => {})
   }))
 }
 

@@ -20,6 +20,11 @@ registerHooks({ resolve(specifier, context, next) {
 
 const secure = await import('../lib/secure-session.ts')
 const credentials = await import('../lib/turn-credential.ts')
+// The credential a turn's model requests would bill, or null when nothing may.
+const credentialOf = async (chatId, turnId) => {
+  const funding = await credentials.readExecutionFunding(chatId, turnId)
+  return funding.ok ? funding.credential : null
+}
 const { POST: signout } = await import('../app/api/auth/signout/route.ts')
 
 const session = (loginId) => ({
@@ -125,8 +130,8 @@ test('logout waits for one durable revocation write, then returns before cleanup
   assert.deepEqual(state.commands, ['set'], 'no chat enumeration, credential read or deletion on the response path')
   assert.ok(state.values.has('signout-test:credential:laptop-chat'), 'cleanup has not run yet')
   assert.equal(await credentials.readTurnCredential('laptop-chat'), null)
-  assert.equal(await credentials.readExecutionCredential('laptop-chat', 1), null)
-  assert.equal((await credentials.readExecutionCredential('phone-chat', 1)).loginId, phone.loginId)
+  assert.deepEqual(await credentials.readExecutionFunding('laptop-chat', 1), { ok: false, refused: 'revoked' })
+  assert.equal((await credentialOf('phone-chat', 1)).loginId, phone.loginId)
   assert.equal(fetch.mock.callCount(), 0, 'provider revocation does not block success')
   assert.equal(state.cancellations.length, 0)
   assert.equal(response.headers.get('clear-site-data'), null, 'Clear-Site-Data stalls Chrome for seconds; previews revalidate instead')
@@ -135,7 +140,7 @@ test('logout waits for one durable revocation write, then returns before cleanup
   assert.deepEqual(state.cancellations, [[laptop.userId, laptop.loginId]])
   assert.equal(state.values.has('signout-test:credential:laptop-chat'), false)
   assert.equal(fetch.mock.callCount(), 1, 'provider failure cannot restore the deleted credential')
-  assert.equal(await credentials.readExecutionCredential('laptop-chat', 1), null)
+  assert.equal(await credentialOf('laptop-chat', 1), null)
 })
 
 test('pending logout hides the old grant from normal readers but still revokes it on retry', async (t) => {
@@ -166,18 +171,19 @@ test('logout retains cookies and allows retry if the durable revocation write fa
   assert.deepEqual(await secure.getSessionFromRequest(incoming), {}, 'failed revocation must still hide the account on reload')
   assert.equal(response.headers.get('clear-site-data'), null)
   assert.equal((await response.json()).success, undefined)
-  assert.equal((await credentials.readExecutionCredential('active-chat', 1)).loginId, user.loginId)
+  assert.equal((await credentialOf('active-chat', 1)).loginId, user.loginId)
   assert.equal(state.after.length, 0)
   assert.equal(fetch.mock.callCount(), 0)
   state.fail = null
   assert.equal((await signout(incoming)).status, 200)
-  assert.equal(await credentials.readExecutionCredential('active-chat', 1), null)
+  assert.equal(await credentialOf('active-chat', 1), null)
 })
 
 for (const failure of ['read', 'delete']) test(`revoked credentials stay unusable when background cleanup ${failure} and OAuth fail`, async (t) => {
   const state = fixture(t)
   const laptop = session('a'.repeat(32)), phone = session('b'.repeat(32))
-  await credentials.saveTurnCredential('legacy-chat', laptop)
+  // A chat from before per-turn funding holds only its latest credential.
+  await credentials.renewLatestCredential('legacy-chat', laptop)
   await credentials.saveTurnCredential('shared-chat', laptop, 1)
   await credentials.saveTurnCredential('shared-chat', phone, 2)
   state.fail = failure
@@ -185,12 +191,12 @@ for (const failure of ['read', 'delete']) test(`revoked credentials stay unusabl
   assert.equal((await signout(await request(laptop))).status, 200)
   await assert.rejects(state.after[0](), /synthetic/)
   assert.equal(await credentials.readTurnCredential('legacy-chat'), null)
-  assert.equal(await credentials.readExecutionCredential('legacy-chat'), null)
-  assert.equal(await credentials.readExecutionCredential('shared-chat', 1), null, 'exact-turn fallback is fenced')
-  assert.equal((await credentials.readExecutionCredential('shared-chat', 2)).loginId, phone.loginId)
+  assert.equal(await credentialOf('legacy-chat'), null)
+  assert.equal(await credentialOf('shared-chat', 1), null, 'exact-turn fallback is fenced')
+  assert.equal((await credentialOf('shared-chat', 2)).loginId, phone.loginId)
   assert.equal((await credentials.readTurnCredential('shared-chat')).loginId, phone.loginId)
   await assert.rejects(credentials.saveTurnCredential('new-chat', laptop, 1), /Signed out/)
-  await assert.rejects(credentials.saveTurnCredential('legacy-chat', { ...laptop, expiresAt: laptop.expiresAt + 3600_000 }), /Signed out/)
+  await assert.rejects(credentials.renewLatestCredential('legacy-chat', { ...laptop, expiresAt: laptop.expiresAt + 3600_000 }), /Signed out/)
 })
 
 test('a save admitted before logout cannot resurrect execution credentials after revocation', async (t) => {
@@ -205,7 +211,7 @@ test('a save admitted before logout cannot resurrect execution credentials after
   await pending
   assert.ok(state.values.has('signout-test:credential:late-chat'), 'the delayed write really completed')
   assert.equal(await credentials.readTurnCredential('late-chat'), null)
-  assert.equal(await credentials.readExecutionCredential('late-chat', 1), null)
+  assert.equal(await credentialOf('late-chat', 1), null)
 })
 
 test('execution fails closed if the revocation check is unavailable', async (t) => {
@@ -214,7 +220,7 @@ test('execution fails closed if the revocation check is unavailable', async (t) 
   await credentials.saveTurnCredential('active-chat', user, 1)
   state.fail = 'revocation-read'
   await assert.rejects(credentials.readTurnCredential('active-chat'), /revocation read failure/)
-  await assert.rejects(credentials.readExecutionCredential('active-chat', 1), /revocation read failure/)
+  await assert.rejects(credentialOf('active-chat', 1), /revocation read failure/)
 })
 
 test('anonymous logout clears cookies without requiring a configured credential store', async (t) => {

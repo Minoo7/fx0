@@ -85,7 +85,7 @@ fx0 keeps the transcript, designs and settings in Redis. Here is one message fro
 
 **1. Save the message before answering.** `POST /api/prompt` adds the message to the transcript in one Redis script, then hands it to libfx with its message id. libfx stores it before acknowledging, so a message that shows as sent can't be lost, and a retried request reaches the same turn.
 
-**2. Keep the turn's funding.** A queue delivery has no browser cookie, so the prompt route seals its funding in Redis. Paid-only chats use the sender's OAuth grant. A trial chat records each turn's funding separately: either the admitted sponsorship or its paid sender and team. Fresh SDK diagnostics and the journal's restore hook identify the executing turn after a crash. Refresh tokens stay in the cookie, and the server trial key stays out of every stored credential. Missing or expired trial funding never falls back to a customer's paid grant.
+**2. Keep the turn's funding.** A queue delivery has no browser cookie, so the prompt route seals its funding in Redis. Every message records the funding of the turn it starts: either the admitted sponsorship or its paid sender's OAuth grant and team. Fresh SDK diagnostics and the journal's restore hook identify the executing turn after a crash. Refresh tokens stay in the cookie, and the server trial key stays out of every stored credential. Missing or expired trial funding never falls back to a customer's paid grant.
 
 **3. libfx runs the turn.** One worker holds a session at a time, and libfx fences out any other. The prompt request runs the turn first; it and each delivery to `/api/libfx` can run for 800 seconds, their `maxDuration`. libfx stops a turn 30 seconds before that limit, keeping what it has done so far, and a delivery to `/api/libfx` continues it, so a long turn spans several invocations.
 
@@ -109,7 +109,7 @@ You can watch this happen. Open session diagnostics from the header to see the c
 
 - If a prompt request crashes while it runs its turn, for example by running out of memory, the turn continues about 13 minutes after the send, however early the crash came. On Vercel, libfx can't tell a crashed function from a slow one, so a crashed request still holds the session until its 800-second limit, and the prompt's backstop takes over 5 seconds later. The page keeps showing the reply as running meanwhile. A turn that only runs long isn't affected: libfx stops it 30 seconds before the limit and queues the rest at once for a delivery to `/api/libfx`.
 - A text message sent while a tool runs, such as while a design is being written, waits for that tool before the model sees it. A message with images runs as its own turn, after any running turn finishes.
-- Paid-only chats use the latest stored user credential. Trial chats pin funding per turn; a later paid input cannot change an earlier free turn's funding. Token renewal keeps the original paid turn's billing team.
+- Every turn bills the login and team that sent the message that started it; a later message cannot change an earlier turn's funding. A text message that joins a running turn is billed to that turn. Token renewal from the same login keeps the turn's billing team.
 - Free prompts start in a new design on Opus 5.5 Fast with low effort. Existing paid-only chats keep their own billing. The allowance is five per IP across chats and browsers, with no periodic refill; clearing cookies does not reset it. After it is used, sign in to continue with your own team.
 - A design being written streams through a bounded, expiring Redis channel, so viewers on other instances can see it too. Reconnecting resumes from the full prefix; generation IDs and offsets prevent duplicated bytes. The provisional preview strips active markup and runs without scripts. Publishing or ending a turn closes its draft before it can replace the finished preview.
 - Deleting a chat removes fx0's records and credential. libfx's session data expires with the World's retention.
@@ -178,7 +178,7 @@ The auth and route tests mock Vercel, AI Gateway and both databases, so check a 
 
 Generated pages run in a sandboxed iframe on an opaque origin. They can't read the app's cookies, storage or credentials, and their Content Security Policy blocks network requests (`connect-src 'none'`). It's still the browser enforcing all of this, though, not a sealed VM.
 
-Paid model requests carry the sender's OAuth token only to AI Gateway. Between requests it stays sealed in Redis and expires with the token. Sponsored requests require a recorded trial admission; the server key is never sent to a browser, cookie, journal or model prompt. Signing out deletes that login's stored credentials, revokes its token and cancels its running turns. Treat the session cookie and `SESSION_SECRET` as credentials.
+Paid model requests carry the sender's OAuth token only to AI Gateway. Between requests it stays sealed in Redis and expires with the token. Sponsored requests require a recorded trial admission; the server key is never sent to a browser, cookie, journal or model prompt. Signing out deletes that login's stored credentials, revokes its token and cancels the running turns it funded. Treat the session cookie and `SESSION_SECRET` as credentials.
 
 ## License
 

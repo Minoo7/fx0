@@ -1,7 +1,7 @@
 import { createFxAgent, createFxEngine, type FxAgent, type FxAgentHostTool, type FxEffort, type FxHostTool, type FxSession, type FxToolContext } from 'libfx'
 import { createTools, type ToolHost } from './tools'
 import { gatewayFetch, type GatewayError, type DesignDraftObserver } from './gateway-session'
-import { readExecutionCredential } from './turn-credential'
+import { readExecutionFunding } from './turn-credential'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { AuthError } from './accounts.ts'
 import type { SessionData } from './secure-session'
@@ -80,7 +80,8 @@ function chatFetch(
     const id = await chatId()
     const url = new URL(input instanceof Request ? input.url : String(input))
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
-    if (method === 'POST' && url.pathname.endsWith('/language-model') && typeof init?.body === 'string') {
+    const modelRequest = method === 'POST' && url.pathname.endsWith('/language-model')
+    if (modelRequest && typeof init?.body === 'string') {
       let step = 1
       try { step = turnModelStep(JSON.parse(init.body)) } catch { /* libfx validates its own body */ }
       if (step > MAX_TURN_MODEL_STEPS) {
@@ -94,11 +95,14 @@ function chatFetch(
       chatGateways.set(id, gateway)
       // Both reads use the same executing turn; reserving its preview adds no serial
       // round trip to the credential lookup before the model request starts.
-      const [credential, draft] = await Promise.all([
-        readExecutionCredential(id, turn),
-        turn && method === 'POST' && url.pathname.endsWith('/language-model')
-          ? storedDraftObserver(id, turn).catch(() => undefined) : undefined,
+      const [funding, draft] = await Promise.all([
+        readExecutionFunding(id, turn),
+        turn && modelRequest ? storedDraftObserver(id, turn).catch(() => undefined) : undefined,
       ])
+      // The request fails below with "sign in again"; the log says why, with
+      // the turn and reason only, never a credential.
+      if (!funding.ok && modelRequest) log(id, 'funding:refused', { turn: turn ?? null, reason: funding.refused })
+      const credential = funding.ok ? funding.credential : null
       gateway.gatewaySession = !credential ? null : 'kind' in credential ? credential : { ...credential, email: '', loginAt: 0, isLoggedIn: true }
       observer = draft
     }
@@ -233,7 +237,7 @@ export async function runSubagent(
   signal: AbortSignal,
 ): Promise<string> {
   const chatId = host.id
-  const [credential, active] = await Promise.all([readExecutionCredential(chatId, turnId), getActiveTurn(chatId)])
+  const [funding, active] = await Promise.all([readExecutionFunding(chatId, turnId), getActiveTurn(chatId)])
   // The parent turn's settings, even if the chat's were changed since it started.
   const pinned = active?.id === turnId ? active.settings : undefined
   const engine = await createFxEngine({
@@ -241,7 +245,7 @@ export async function runSubagent(
     fetch: chatFetch(async () => chatId, () => turnId),
     model: pinned
       ? { id: pinned.model, effort: pinned.effort as FxEffort, fast: pinned.fast }
-      : chatModel(host, !!credential && 'kind' in credential),
+      : chatModel(host, funding.ok && 'kind' in funding.credential),
     instructions,
     tools: [
       ...createTools(await runtime.toolHost(chatId, turnId, signal), { allowSubagent: false }).map(tool => ({
