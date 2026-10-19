@@ -99,7 +99,7 @@ export default function AccountMenu({ user, team = null, onSignOut, signOutStatu
   if (!user) return signIn()
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover modal open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
           variant="ghost"

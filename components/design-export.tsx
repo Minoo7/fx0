@@ -115,6 +115,7 @@ export default function DesignExport({
 
   return (
     <Popover
+      modal
       open={open}
       onOpenChange={(next) => {
         setOpen(next)
