@@ -334,7 +334,13 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   const accountUser = user === undefined ? undefined : isAuthenticated ? user : null
 
   function openSignIn() {
-    if (signedOut.current) return
+    // After a failed sign-out the old grant is unusable (the pending marker hides it)
+    // and retrying may keep failing. A fresh sign-in is the way out: the callback
+    // clears the marker and issues a new login id.
+    if (signedOut.current) {
+      if (signOutStatus === 'failed') window.location.assign('/api/auth/signin')
+      return
+    }
     signInSends.current = false
     setDraftError('')
     setSignInOpen(true)

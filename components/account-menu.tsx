@@ -78,7 +78,7 @@ export default function AccountMenu({ user, team = null, onSignOut, signOutStatu
   const rowClass = sidebar ? 'h-8 w-full max-w-none justify-start px-3 text-[13px] text-foreground-secondary hover:text-foreground focus-visible:ring-offset-sidebar' : 'max-w-32'
 
   const signIn = (className = '') => (
-    <Button variant="ghost" size="sm" disabled={signOutStatus != null} className={`${sidebar ? rowClass : 'shrink-0'} ${className}`} {...fastClick(onSignIn)}>
+    <Button variant="ghost" size="sm" disabled={signOutStatus === 'pending'} className={`${sidebar ? rowClass : 'shrink-0'} ${className}`} {...fastClick(onSignIn)}>
       Sign in
     </Button>
   )
