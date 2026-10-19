@@ -1,19 +1,18 @@
 import type { FxAgent, FxStreamLine } from 'libfx'
 import { tail } from './tools'
 import {
-  clearActiveTurn,
+  finishTurnWork,
   getActiveTurn,
   projectEvents,
   projectedCursor,
-  readDesignArtifact,
   readEvents,
   readSession,
-  readSessionView,
-  setActiveTurn,
-  type ActiveTurn,
+  readTurnWork,
   type TurnSettings,
+  type TurnStart,
+  type TurnWork,
 } from './journal'
-import { recordGeneration, recordTurn } from './history'
+import { recordGeneration, recordTurn, type TurnRecord } from './history'
 import { readExecutionFunding } from './turn-credential'
 import { effectiveEffort, effectiveFast, effectiveModel, INSTANCE, log, type SessionState } from './session'
 import type { StreamItem } from './events'
@@ -126,56 +125,76 @@ function turnSettings(host: SessionState, sponsored: boolean): TurnSettings {
     : { model: effectiveModel(host), effort: effectiveEffort(host), fast: effectiveFast(host) }
 }
 
-async function startTurn(host: SessionState, id: number, input: string | undefined, startSeq: number): Promise<void> {
+// A turn's running record, read before its turn_start commits so that the commit
+// can mark it running in the same script (see projectEvents). If these reads
+// fail, nothing commits and the next follower projects the lines again.
+async function readTurnStart(host: SessionState, id: number, input: string | undefined): Promise<TurnStart> {
   const [funding] = await Promise.all([readExecutionFunding(host.id, id), readSettings(host)])
   const credential = funding.ok ? funding.credential : null
   const sponsored = !!credential && 'kind' in credential
-  const turn: ActiveTurn = {
+  return {
     id,
     startedAt: Date.now(),
     billingTeamId: credential?.teamId ?? null,
     ...(sponsored ? { sponsored: true as const } : {}),
     prompt: promptText(input),
-    startSeq,
     settings: turnSettings(host, sponsored),
   }
-  await setActiveTurn(host.id, turn)
 }
 
-async function endTurn(host: SessionState, terminal: StreamItem): Promise<void> {
-  const id = terminal.id!
-  const active = await getActiveTurn(host.id)
-  await clearActiveTurn(host.id, id)
-  const turn = active?.id === id ? active : null
-  const stored = await readSettings(host)
+// A finished turn's history row, from the work its end left and the transcript
+// since it started. `host` carries the chat's settings, for a turn whose start
+// was never recorded.
+export function turnHistoryRow(host: SessionState, work: TurnWork, events: StreamItem[]): TurnRecord {
+  const turn = work.turn ?? null
   const settings = turn?.settings ?? turnSettings(host, !!turn?.sponsored)
-  const events = turn ? await readEvents(host.id, Math.max(0, turn.startSeq - 1)) : []
-  const response = events.filter((item) => item.type === 'text' && item.turnId === id).map((item) => item.delta ?? '').join('')
-  // One history version per turn: the design as the turn left it, if it
-  // published one and no later turn has published since.
-  if (stored?.artifactTurn === id) {
-    const [view, html] = await Promise.all([readSessionView(host.id), readDesignArtifact(host.id)])
-    if (html != null) {
-      await recordGeneration(host.id, view.artifactRevision, id, html).catch(() =>
-        log(host.id, 'history:generation:error', { revision: view.artifactRevision }))
-    }
-  }
-  await recordTurn({
+  return {
     sessionId: host.id,
-    turnId: id,
+    turnId: work.turnId,
     prompt: turn?.prompt ?? '',
-    response,
+    response: events.filter((item) => item.type === 'text' && item.turnId === work.turnId).map((item) => item.delta ?? '').join(''),
     model: settings.model,
     effort: settings.effort,
     fast: settings.fast,
-    status: terminal.type === 'done' ? 'done' : 'error',
-    stopReason: terminal.type === 'done' ? terminal.stopReason ?? null : null,
+    status: work.type === 'done' ? 'done' : 'error',
+    stopReason: work.type === 'done' ? work.stopReason ?? null : null,
     billingTeamId: turn?.billingTeamId ?? null,
-    inputTokens: terminal.usage?.inputTokens ?? null,
-    outputTokens: terminal.usage?.outputTokens ?? null,
-    startedAt: turn?.startedAt ?? Date.now(),
-  }).catch(() => log(host.id, 'history:turn:error', { id }))
+    inputTokens: work.usage?.inputTokens ?? null,
+    outputTokens: work.usage?.outputTokens ?? null,
+    startedAt: turn?.startedAt ?? work.at ?? 0,
+  }
 }
+
+// Writes the history of every finished turn still waiting: one row per turn and
+// one design version, the design as the turn left it. Both inserts are idempotent,
+// and a turn's work is removed only once they succeed, so a crash, a database
+// error or a second follower can neither lose nor duplicate a row. A failure
+// leaves the rest for the next follower of the chat.
+export async function finishTurns(host: SessionState): Promise<void> {
+  let work: TurnWork[]
+  try {
+    work = await readTurnWork(host.id)
+    if (work.length) await readSettings(host)
+  } catch (error) {
+    log(host.id, 'history:read:error', { error: errorText(error) })
+    return
+  }
+  for (const item of work) {
+    try {
+      if (item.design) await recordGeneration(host.id, item.design.revision, item.turnId, item.design.html)
+      if (item.type) {
+        const events = item.turn ? await readEvents(host.id, Math.max(0, item.turn.startSeq - 1)) : []
+        await recordTurn(turnHistoryRow(host, item, events))
+      }
+      await finishTurnWork(host.id, item.turnId)
+    } catch (error) {
+      log(host.id, 'history:turn:error', { id: item.turnId, error: errorText(error) })
+      return
+    }
+  }
+}
+
+const errorText = (error: unknown) => String((error as Error)?.message ?? error).slice(0, 200)
 
 const BATCH_MS = 40
 
@@ -190,6 +209,8 @@ export interface FollowOptions {
 // chat stays idle for idleMs, when the signal aborts, or when another projector
 // moved the cursor first (that one carries on).
 export async function project(agent: FxAgent, host: SessionState, libfxSessionId: string, options: FollowOptions): Promise<void> {
+  // History an earlier follower could not finish, before following on.
+  await finishTurns(host)
   let cursor = await projectedCursor(host.id)
   const reader = agent.session(libfxSessionId).stream(cursor).getReader()
   const decoder = new TextDecoder()
@@ -215,19 +236,23 @@ export async function project(agent: FxAgent, host: SessionState, libfxSessionId
     if (!batch.length) return true
     const toCursor = batch[batch.length - 1].line.cursor ?? cursor
     const entries = mergeDeltas(batch.flatMap((part) => part.entries))
-    const items = await projectEvents(host.id, cursor, toCursor, entries)
+    const starts: Record<number, TurnStart> = {}
+    for (const { line } of batch) {
+      const id = line.type === 'turn_start' ? messageIdOf(line) : null
+      if (id != null && line.type === 'turn_start') starts[id] = await readTurnStart(host, id, line.input)
+    }
+    const items = await projectEvents(host.id, cursor, toCursor, entries, starts)
     if (!items) return false
     cursor = toCursor
+    let ended = false
     for (const item of items) {
-      if (item.type === 'turn_start') {
-        running = true
-        const line = batch.find((part) => part.line.type === 'turn_start' && messageIdOf(part.line) === item.id)?.line
-        await startTurn(host, item.id!, line?.type === 'turn_start' ? line.input : undefined, item.seq ?? 0)
-      } else if (item.type === 'done' || item.type === 'error') {
+      if (item.type === 'turn_start') running = true
+      else if (item.type === 'done' || item.type === 'error') {
         running = false
-        await endTurn(host, item)
+        ended = true
       }
     }
+    if (ended) await finishTurns(host)
     armIdle()
     return true
   }
@@ -237,7 +262,11 @@ export async function project(agent: FxAgent, host: SessionState, libfxSessionId
   const scheduleCommit = () => {
     flushTimer ??= setTimeout(() => {
       flushTimer = null
-      committing = committing.then((ok) => (ok ? commit() : false)).then((ok) => {
+      committing = committing.then((ok) => (ok ? commit() : false)).catch((error) => {
+        // Nothing committed: the next follower projects these lines again.
+        log(host.id, 'projector:error', { error: errorText(error) })
+        return false
+      }).then((ok) => {
         if (!ok) stop()
         return ok
       })

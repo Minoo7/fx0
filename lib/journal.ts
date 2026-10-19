@@ -432,6 +432,8 @@ const SESSION_PARTS = [
   'question-seq',
   'state',
   'transcript',
+  'turn-designs',
+  'turn-work',
 ] as const
 
 const CLAIM_CLEANUP = `
@@ -546,12 +548,24 @@ local revision = tonumber(redis.call('HGET', KEYS[2], 'artifactRevision') or '0'
 if redis.call('GET', KEYS[3]) == ARGV[1] then
   return cjson.encode({status = 'unchanged', revision = revision})
 end
+-- The design another turn published last is that turn's history version. A turn
+-- whose end is still to be projected would find it replaced, so keep it now.
+local previous = redis.call('HGET', KEYS[2], 'artifactTurn')
+if previous and previous ~= '' and previous ~= ARGV[3] then
+  local html = redis.call('GET', KEYS[3])
+  if html then
+    redis.call('HSET', KEYS[8], previous, cjson.encode({revision = revision, html = html}))
+    redis.call('EXPIRE', KEYS[8], ARGV[4])
+  end
+end
 redis.call('SET', KEYS[3], ARGV[1])
 revision = redis.call('HINCRBY', KEYS[2], 'artifactRevision', 1)
 local event = {type = 'artifact', artifactRevision = revision, at = tonumber(ARGV[2])}
 if ARGV[3] ~= '' then
   event.turnId = tonumber(ARGV[3])
   redis.call('HSET', KEYS[2], 'artifactTurn', ARGV[3])
+else
+  redis.call('HDEL', KEYS[2], 'artifactTurn')
 end
 local seq = redis.call('INCR', KEYS[4])
 event.seq = seq
@@ -581,10 +595,11 @@ export async function publishDesignArtifact(
       key(sessionId, 'events'),
       key(sessionId, 'draft'),
       key(sessionId, 'draft-chunks'),
+      key(sessionId, 'turn-designs'),
     ],
     // The stored design is the normalized one validation passed, never the raw input.
     // The turn lets the transcript group a turn's revisions under its activity.
-    [validation.html, String(Date.now()), turnId == null ? '' : String(turnId)],
+    [validation.html, String(Date.now()), turnId == null ? '' : String(turnId), String(TURN_WORK_SECONDS)],
   )
   const result = parseJson<{
     status: 'published' | 'unchanged' | 'fenced'
@@ -602,27 +617,13 @@ export async function publishDesignArtifact(
   }
 }
 
-// The projector marks a turn active at its turn_start and clears it at its
-// turn_end. The TTL bounds a turn whose end the projector never sees.
+// projectEvents marks a turn active at its turn_start and clears it at its end,
+// in the same script as those lines. The TTL bounds a turn whose end is never seen.
 const ACTIVE_TURN_MS = 30 * 60_000
-
-export async function setActiveTurn(sessionId: string, turn: ActiveTurn): Promise<void> {
-  await redis().set(key(sessionId, 'active'), JSON.stringify(turn), { px: ACTIVE_TURN_MS })
-}
 
 export async function getActiveTurn(sessionId: string): Promise<ActiveTurn | null> {
   const value = await redis().get<unknown>(key(sessionId, 'active'))
   return value == null ? null : parseJson<ActiveTurn>(value)
-}
-
-// Clears only the turn that ended, never a later one already marked.
-const CLEAR_ACTIVE_TURN = `
-local value = redis.call('GET', KEYS[1])
-if value and cjson.decode(value).id == tonumber(ARGV[1]) then redis.call('DEL', KEYS[1]) end
-return 1
-`
-export async function clearActiveTurn(sessionId: string, turnId: number): Promise<void> {
-  await redis().eval<unknown[], number>(CLEAR_ACTIVE_TURN, [key(sessionId, 'active')], [String(turnId)])
 }
 
 export interface ActiveQuestion {
@@ -715,16 +716,44 @@ export async function projectedCursor(sessionId: string): Promise<number> {
   return Number((await redis().get<number>(key(sessionId, 'projected'))) ?? 0)
 }
 
+// A turn's running record, as its start is projected: its startSeq is the seq the
+// turn_start line gets in the same script.
+export type TurnStart = Omit<ActiveTurn, 'startSeq'>
+
+// What a finished turn still owes its history, kept in Redis until it is written:
+// its end, the running record that end found (absent if the start was never
+// recorded), and the design the turn left. Work for a design alone comes from a
+// publish that replaced it before the turn's end was projected.
+export interface TurnWork {
+  turnId: number
+  type?: 'done' | 'error'
+  stopReason?: string
+  usage?: { inputTokens?: number; outputTokens?: number }
+  at?: number
+  turn?: ActiveTurn
+  design?: { revision: number; html: string }
+}
+
+// Work left by a turn whose history cannot be written is retried by later
+// followers of the chat, for this long.
+const TURN_WORK_SECONDS = 7 * 24 * 60 * 60
+
 // Appends the items copied from libfx's stream between two cursors, only if no
 // other projector moved the cursor first: each libfx line reaches the transcript
-// once however many projectors follow the chat.
+// once however many projectors follow the chat. The turn bookkeeping those lines
+// imply commits with them: a turn_start marks the turn running, and a turn's end
+// clears it and leaves the turn's history work, with the design it left if it
+// published last. So a crash, or a projector on another instance, can neither skip
+// that bookkeeping nor apply it out of order.
 const PROJECT_EVENTS = INIT_STATE + `
 if redis.call('EXISTS', KEYS[4]) == 1 then return false end
 if tonumber(redis.call('GET', KEYS[5]) or '0') ~= tonumber(ARGV[1]) then return false end
 local items = cjson.decode(ARGV[3])
+local starts = cjson.decode(ARGV[6])
 local out = {}
 for i, item in ipairs(items) do
-  if item.type == 'done' or item.type == 'error' then
+  local ended = item.type == 'done' or item.type == 'error'
+  if ended then
     local turn = item.turnId or item.id or 0
     local closed = tonumber(redis.call('HGET', KEYS[3], 'draftClosedTurn') or '0')
     redis.call('HSET', KEYS[3], 'draftClosedTurn', math.max(closed, turn))
@@ -737,6 +766,32 @@ for i, item in ipairs(items) do
   local encoded = cjson.encode(item)
   redis.call('RPUSH', KEYS[2], encoded)
   out[i] = encoded
+  if item.type == 'turn_start' and item.id and starts[tostring(item.id)] then
+    local start = starts[tostring(item.id)]
+    start.startSeq = item.seq
+    redis.call('SET', KEYS[8], cjson.encode(start), 'PX', ARGV[7])
+  elseif ended and item.id then
+    local work = {turnId = item.id, type = item.type, stopReason = item.stopReason, usage = item.usage, at = item.at}
+    local active = redis.call('GET', KEYS[8])
+    if active then
+      local running = cjson.decode(active)
+      if running.id == item.id then
+        work.turn = running
+        redis.call('DEL', KEYS[8])
+      end
+    end
+    redis.call('HSET', KEYS[9], tostring(item.id), cjson.encode(work))
+    redis.call('EXPIRE', KEYS[9], ARGV[8])
+    if tonumber(redis.call('HGET', KEYS[3], 'artifactTurn') or '0') == item.id then
+      local html = redis.call('GET', KEYS[11])
+      if html then
+        local revision = tonumber(redis.call('HGET', KEYS[3], 'artifactRevision') or '0')
+        redis.call('HSET', KEYS[10], tostring(item.id), cjson.encode({revision = revision, html = html}))
+        redis.call('EXPIRE', KEYS[10], ARGV[8])
+      end
+      redis.call('HDEL', KEYS[3], 'artifactTurn')
+    end
+  end
 end
 redis.call('SET', KEYS[5], ARGV[2])
 init_state(KEYS[3], ARGV[4], ARGV[5])
@@ -747,14 +802,46 @@ export async function projectEvents(
   fromCursor: number,
   toCursor: number,
   entries: (Omit<StreamItem, 'seq'>)[],
+  starts: Record<number, TurnStart> = {},
 ): Promise<StreamItem[] | null> {
   const raw = await redis().eval<unknown[], unknown>(PROJECT_EVENTS,
     [key(sessionId, 'event-seq'), key(sessionId, 'events'), key(sessionId, 'state'), key(sessionId, 'deleting'),
-      key(sessionId, 'projected'), key(sessionId, 'draft'), key(sessionId, 'draft-chunks')],
-    [String(fromCursor), String(toCursor), JSON.stringify(entries), sessionId, String(Date.now())])
+      key(sessionId, 'projected'), key(sessionId, 'draft'), key(sessionId, 'draft-chunks'),
+      key(sessionId, 'active'), key(sessionId, 'turn-work'), key(sessionId, 'turn-designs'), key(sessionId, 'design-artifact')],
+    [String(fromCursor), String(toCursor), JSON.stringify(entries), sessionId, String(Date.now()),
+      JSON.stringify(starts), String(ACTIVE_TURN_MS), String(TURN_WORK_SECONDS)])
   if (raw === null || raw === false) return null
   // An empty Lua table comes back as an empty array or an empty object.
   const items = Array.isArray(raw) ? raw.map((item) => parseJson<StreamItem>(item)) : []
   for (const item of items) announce(sessionId, item)
   return items
+}
+
+// Every finished turn's history work still waiting, oldest turn first.
+export async function readTurnWork(sessionId: string): Promise<TurnWork[]> {
+  const [work, designs] = await Promise.all([
+    redis().hgetall<Record<string, unknown>>(key(sessionId, 'turn-work')),
+    redis().hgetall<Record<string, unknown>>(key(sessionId, 'turn-designs')),
+  ])
+  const byTurn = new Map<number, TurnWork>()
+  for (const value of Object.values(work ?? {})) {
+    const item = parseJson<TurnWork>(value)
+    byTurn.set(item.turnId, item)
+  }
+  for (const [turn, value] of Object.entries(designs ?? {})) {
+    const turnId = Number(turn)
+    byTurn.set(turnId, { ...(byTurn.get(turnId) ?? { turnId }), design: parseJson<{ revision: number; html: string }>(value) })
+  }
+  return [...byTurn.values()].sort((a, b) => a.turnId - b.turnId)
+}
+
+// A turn's history is written: its work and its design go together.
+const FINISH_TURN_WORK = `
+redis.call('HDEL', KEYS[1], ARGV[1])
+redis.call('HDEL', KEYS[2], ARGV[1])
+return 1
+`
+export async function finishTurnWork(sessionId: string, turnId: number): Promise<void> {
+  await redis().eval<unknown[], number>(FINISH_TURN_WORK,
+    [key(sessionId, 'turn-work'), key(sessionId, 'turn-designs')], [String(turnId)])
 }

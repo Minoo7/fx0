@@ -219,11 +219,11 @@ test('journal Redis integration uses isolated durable session state', async (t) 
 
     await t.test('a turn end clears only its own turn', async () => {
       const sessionId = 'active-turn'
-      const turn = { id: 2, startedAt: 1, billingTeamId: 'team_a', prompt: 'p', startSeq: 3 }
-      await journal.setActiveTurn(sessionId, turn)
-      await journal.clearActiveTurn(sessionId, 1)
-      assert.deepEqual(await journal.getActiveTurn(sessionId), turn)
-      await journal.clearActiveTurn(sessionId, 2)
+      const start = { id: 2, startedAt: 1, billingTeamId: 'team_a', prompt: 'p' }
+      const [item] = await journal.projectEvents(sessionId, 0, 1, [{ type: 'turn_start', id: 2, turnId: 2, at: 1 }], { 2: start })
+      await journal.projectEvents(sessionId, 1, 2, [{ type: 'done', id: 1, turnId: 1, at: 2 }])
+      assert.deepEqual(await journal.getActiveTurn(sessionId), { ...start, startSeq: item.seq })
+      await journal.projectEvents(sessionId, 2, 3, [{ type: 'done', id: 2, turnId: 2, at: 3 }])
       assert.equal(await journal.getActiveTurn(sessionId), null)
     })
 
@@ -232,9 +232,9 @@ test('journal Redis integration uses isolated durable session state', async (t) 
       await journal.updateSession(id, { preferredEffort: null })
       await journal.appendEvent(id, { type: 'status', text: 'before deletion' })
       await journal.bindLibfxSession(id, 'wrun_deleted')
-      await journal.setActiveTurn(id, { id: 1, startedAt: 1, billingTeamId: null, prompt: '', startSeq: 1 })
+      await journal.projectEvents(id, 0, 1, [{ type: 'turn_start', id: 1, turnId: 1, at: 1 }], { 1: { id: 1, startedAt: 1, billingTeamId: null, prompt: '' } })
       assert.equal(await journal.claimSessionCleanup(id, randomUUID()), 'busy')
-      await journal.clearActiveTurn(id, 1)
+      await journal.projectEvents(id, 1, 2, [{ type: 'done', id: 1, turnId: 1, at: 2 }])
       const token = randomUUID()
       assert.equal(await journal.claimSessionCleanup(id, token), 'claimed')
       await journal.releaseSessionCleanup(id, token)

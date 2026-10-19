@@ -16,6 +16,7 @@
     "db:migrate": "node --env-file-if-exists=.env.local scripts/migrate-database.mjs",
     "test:artifact:browser": "node --experimental-strip-types --test tests/design-artifact.browser.mjs",
     "test:budget:integration": "node --experimental-strip-types --test tests/turn-budget.integration.mjs",
+    "test:turns:integration": "node --experimental-strip-types --test tests/turn-work.integration.mjs",
     "test:trial:integration": "node --experimental-strip-types --test tests/trial.integration.mjs",
     "test:credential:integration": "node --experimental-strip-types --test tests/turn-credential.integration.mjs"
   },

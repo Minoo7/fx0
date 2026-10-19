@@ -89,7 +89,7 @@ fx0 keeps the transcript, designs and settings in Redis. Here is one message fro
 
 **3. libfx runs the turn.** One worker holds a session at a time, and libfx fences out any other. The prompt request runs the turn first; it and each delivery to `/api/libfx` can run for 800 seconds, their `maxDuration`. libfx stops a turn 30 seconds before that limit, keeping what it has done so far, and a delivery to `/api/libfx` continues it, so a long turn spans several invocations.
 
-**4. Copy the stream into the transcript.** Any route following the chat, the prompt's own response or an open tab, copies libfx's stream into the transcript. A cursor check makes each line land once, however many follow. When a turn ends, the copy records its history and its design version.
+**4. Copy the stream into the transcript.** Any route following the chat, the prompt's own response or an open tab, copies libfx's stream into the transcript. A cursor check makes each line land once, however many follow. The same Redis script marks a turn running when its start lands, and when its end lands it leaves the turn's history to write, with the design the turn left. The copy then writes that history and design version to Neon, and a write that fails waits in Redis for the next copy to retry.
 
 **5. Pick up where it stopped.** On Vercel, libfx can't tell a crashed function from a slow one, so the request running a turn holds its session until its time limit. The prompt's backstop comes due 5 seconds after that limit: if the request died, the backstop takes the session over and the turn continues where its records end. In a delivery to `/api/libfx`, a process that exits has its delivery run again about a second later, and a function that stops without exiting holds its message until the queue's hold runs out, up to five minutes. The model is told the turn was interrupted, so it can check what happened before going on. A function that only stalled and wakes after that stops at its next write, so two never write at once.
 
@@ -172,6 +172,7 @@ npm run test:journal:integration  # needs KV_REST_API_URL/TOKEN, writes under it
 npm run test:trial:integration    # needs local redis-server/redis-cli; no remote services
 npm run test:artifact:browser     # needs local Chrome (or CHROME_PATH); checks design CSP enforcement
 npm run test:budget:integration   # needs local redis-server/redis-cli; no remote services
+npm run test:turns:integration    # needs local redis-server/redis-cli; no remote services
 ```
 
 The auth and route tests mock Vercel, AI Gateway and both databases, so check a real sign-in and real billing on a deployment.
