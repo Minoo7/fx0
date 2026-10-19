@@ -211,6 +211,7 @@ export default function Composer({
   sessionId,
   initialGeneration,
   sessionReady = true,
+  knownGeneration,
   preference,
   trial = false,
   freePrompts,
@@ -231,6 +232,8 @@ export default function Composer({
   sessionId: string
   initialGeneration: GenerationOptions
   sessionReady?: boolean
+  // The chat's settings as the sidebar listed them: adopted at once on a switch.
+  knownGeneration?: { model: string; effort: string; fast: boolean }
   preference?: Promise<PagePreference>
   trial?: boolean
   freePrompts?: number | null
@@ -517,11 +520,19 @@ export default function Composer({
       setGenerationSession(sessionId)
       return
     }
-    // The page read the first chat's settings as it rendered; later chats ask.
+    // The page read the first chat's settings as it rendered, and the sidebar lists
+    // every other chat's; only a chat missing from both asks the server.
     const rendered = renderedSettings.current
     renderedSettings.current = undefined
     if (rendered) {
       adoptGenerationOptions(sessionId, rendered)
+      return
+    }
+    // A listed chat's settings apply as stored. An empty model means the app
+    // default; it is not replaced with the previous chat's selection.
+    if (knownGeneration) {
+      applyGenerationOptions(sessionId, knownGeneration, false)
+      setGenerationError('')
       return
     }
     void loadGenerationOptions(sessionId).catch((error) => {

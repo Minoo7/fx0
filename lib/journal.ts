@@ -495,7 +495,7 @@ export async function readSessionSummaries(ids: string[]): Promise<SessionInfo[]
     const batch = ids.slice(offset, offset + 200)
     const pipeline = redis().pipeline()
     for (const id of batch) {
-      pipeline.hmget(key(id, 'state'), 'id', 'createdAt', 'lastActivity', 'title', 'trialChat')
+      pipeline.hmget(key(id, 'state'), 'id', 'createdAt', 'lastActivity', 'title', 'trialChat', 'preferredModel', 'preferredEffort', 'preferredFast')
       pipeline.exists(key(id, 'active'))
       pipeline.get(key(id, 'message-seq'))
     }
@@ -506,7 +506,8 @@ export async function readSessionSummaries(ids: string[]): Promise<SessionInfo[]
       if (!state) continue
       sessions.push({ id: state.id, title: state.title, createdAt: state.createdAt,
         lastActivity: state.lastActivity, busy: Number(values[index * 3 + 1] ?? 0) > 0,
-        ...(state.trialChat ? { trialChat: true as const } : {}) })
+        ...(state.trialChat ? { trialChat: true as const } : {}),
+        generation: { model: state.preferredModel ?? '', effort: state.preferredEffort ?? '', fast: state.preferredFast ?? false } })
     }
   }
   return sessions.sort((a, b) => b.lastActivity - a.lastActivity).slice(0, 100)

@@ -74,6 +74,8 @@ export interface SessionInfo {
   createdAt: number
   lastActivity: number
   busy: boolean
+  // The chat's stored picker settings, so switching to it needs no settings request.
+  generation?: { model: string; effort: string; fast: boolean }
 }
 
 export interface SessionPage {

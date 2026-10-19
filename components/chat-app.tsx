@@ -2004,6 +2004,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
               sessionId={sessionId}
               initialGeneration={initialGeneration}
               sessionReady={chatReady}
+              knownGeneration={sessions.find((session) => session.id === sessionId)?.generation}
               preference={preference}
               onSend={send}
               onStop={() => void stop()}
