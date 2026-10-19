@@ -170,6 +170,7 @@ npm run build
 npm run test:smoke                # runs the production build with fake sessions
 npm run test:journal:integration  # needs KV_REST_API_URL/TOKEN, writes under its own prefix
 npm run test:trial:integration    # needs local redis-server/redis-cli; no remote services
+npm run test:artifact:browser     # needs local Chrome (or CHROME_PATH); checks design CSP enforcement
 ```
 
 The auth and route tests mock Vercel, AI Gateway and both databases, so check a real sign-in and real billing on a deployment.

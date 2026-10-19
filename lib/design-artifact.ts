@@ -30,14 +30,37 @@ function escapeAttribute(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 }
 
-export function prepareDesignArtifactHtml(html: string, embeddedCsp?: string, readyToken?: string): string {
+const DOCTYPE = '<!doctype html>'
+
+// The one form of a design that is validated, stored, and rendered. Before the
+// doctype the HTML parser ignores only ASCII whitespace; anything else, such as
+// U+00A0 or U+FEFF, starts the body, so a CSP placed after the doctype would be
+// ignored. Trimming the ends and rewriting the doctype leaves it first, exactly.
+export function normalizeDesignArtifactHtml(html: string): string {
+  return html.trim().replace(/^<!doctype\s+html\s*>/i, DOCTYPE)
+}
+
+// The CSP and bootstrap go right after the doctype, so they are the first things
+// the parser puts in <head>. A design stored before normalization renders the same
+// way; one without a doctype is not rendered at all (null), never without its CSP.
+export function prepareDesignArtifactHtml(html: string, embeddedCsp?: string, readyToken?: string): string | null {
+  const document = normalizeDesignArtifactHtml(html)
+  if (!document.startsWith(DOCTYPE)) return null
   const csp = embeddedCsp
     ? `<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(embeddedCsp)}">`
     : ''
-  return html.replace(/^(\s*<!doctype\s+html\s*>)/i, `$1${csp}${designArtifactBootstrap(readyToken)}`)
+  return DOCTYPE + csp + designArtifactBootstrap(readyToken) + document.slice(DOCTYPE.length)
 }
 
-export type DesignArtifactValidation = { ok: true; bytes: number } | { ok: false; error: string }
+// The start of a document, with invisible characters spelled out, so a rejected
+// publish says exactly what came before the doctype.
+function visibleStart(html: string): string {
+  const start = html.length > 24 ? `${html.slice(0, 24)}…` : html
+  return JSON.stringify(start).replace(/[^\x20-\x7e…]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+}
+
+// `html` is the normalized document: the exact value to store.
+export type DesignArtifactValidation = { ok: true; bytes: number; html: string } | { ok: false; error: string }
 
 interface HtmlTag {
   name: string
@@ -211,19 +234,19 @@ function validateTag(tag: HtmlTag): string | null {
 }
 
 export function validateDesignArtifactHtml(html: string): DesignArtifactValidation {
-  const bytes = Buffer.byteLength(html, 'utf8')
+  const source = normalizeDesignArtifactHtml(html)
+  const bytes = Buffer.byteLength(source, 'utf8')
   if (bytes > MAX_DESIGN_ARTIFACT_BYTES) {
     return { ok: false, error: 'design artifact exceeds 512 KiB' }
   }
 
-  const source = html.trim()
   if (source.includes('<!--')) {
     return { ok: false, error: 'design artifact must not contain HTML comments' }
   }
-  if (!/^<!doctype\s+html\s*>/i.test(source)) {
-    return { ok: false, error: 'design artifact must start with <!doctype html>' }
+  if (!source.startsWith(DOCTYPE)) {
+    return { ok: false, error: `design artifact must start with <!doctype html>, but it starts with ${visibleStart(source)}` }
   }
-  const afterDoctype = source.replace(/^<!doctype\s+html\s*>/i, '')
+  const afterDoctype = source.slice(DOCTYPE.length)
   if (/<(?:!|\?)/.test(afterDoctype)) {
     return { ok: false, error: 'design artifact must not contain markup declarations' }
   }
@@ -250,5 +273,5 @@ export function validateDesignArtifactHtml(html: string): DesignArtifactValidati
     if (error) return { ok: false, error }
   }
 
-  return { ok: true, bytes }
+  return { ok: true, bytes, html: source }
 }

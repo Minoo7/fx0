@@ -2,6 +2,7 @@ import { DESIGN_ARTIFACT_EMBEDDED_CSP, prepareDesignArtifactHtml } from '../../.
 import { readDesignArtifactAt } from '../../../lib/journal'
 import { readGeneration } from '../../../lib/history'
 import { withSessionRoute } from '../../../lib/route-auth'
+import { log } from '../../../lib/session'
 
 export const maxDuration = 30
 
@@ -22,11 +23,15 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
     return new Response(null, { status: 304, headers: { 'cache-control': 'private, no-cache', etag } })
   }
   const readyToken = crypto.randomUUID()
-  const preparedArtifact = artifact == null
-    ? `<!doctype html><html><head><meta charset="utf-8"><title>No design artifact</title></head><body><p>${
-      past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
+  const prepared = artifact == null ? null : prepareDesignArtifactHtml(artifact, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
+  // Every stored design passed validation, so this only guards against one that
+  // somehow lacks a doctype: it is never shown without its CSP.
+  if (artifact != null && prepared == null) log(sessionId, 'artifact:unrenderable', { revision: past ? revision : live!.revision })
+  const preparedArtifact = prepared ??
+    `<!doctype html><html><head><meta charset="utf-8"><title>No design artifact</title></head><body><p>${
+      artifact != null ? 'This design could not be prepared for preview.'
+        : past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
     }</p></body></html>`
-    : prepareDesignArtifactHtml(artifact, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
   const artifactUrl = `data:text/html;base64,${Buffer.from(preparedArtifact, 'utf8').toString('base64')}`
   const csp = [
     "default-src 'none'",

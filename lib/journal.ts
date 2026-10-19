@@ -582,8 +582,9 @@ export async function publishDesignArtifact(
       key(sessionId, 'draft'),
       key(sessionId, 'draft-chunks'),
     ],
+    // The stored design is the normalized one validation passed, never the raw input.
     // The turn lets the transcript group a turn's revisions under its activity.
-    [html, String(Date.now()), turnId == null ? '' : String(turnId)],
+    [validation.html, String(Date.now()), turnId == null ? '' : String(turnId)],
   )
   const result = parseJson<{
     status: 'published' | 'unchanged' | 'fenced'

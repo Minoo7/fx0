@@ -4,6 +4,7 @@ import './runtime.test.mjs'
 import {
   DESIGN_ARTIFACT_EMBEDDED_CSP,
   MAX_DESIGN_ARTIFACT_BYTES,
+  normalizeDesignArtifactHtml,
   prepareDesignArtifactHtml,
   validateDesignArtifactHtml,
 } from '../lib/design-artifact.ts'
@@ -453,6 +454,7 @@ test('design artifact validation accepts inline CSS, JavaScript, Canvas, data as
   assert.deepEqual(validateDesignArtifactHtml(SAFE_DESIGN), {
     ok: true,
     bytes: Buffer.byteLength(SAFE_DESIGN),
+    html: SAFE_DESIGN,
   })
   const interactive = documentWith(
     '<canvas id="scene"></canvas><button onclick="cancelAnimationFrame(window.frame)">Pause</button><script>const canvas=document.querySelector("#scene"); const context=canvas.getContext("2d"); context.fillRect(0,0,10,10); window.frame=requestAnimationFrame(() => {}); const example="<iframe src=https://example.com></iframe>";</script>',
@@ -460,9 +462,10 @@ test('design artifact validation accepts inline CSS, JavaScript, Canvas, data as
   assert.deepEqual(validateDesignArtifactHtml(interactive), {
     ok: true,
     bytes: Buffer.byteLength(interactive),
+    html: interactive,
   })
   const cited = documentWith('<p>Source: <a href="https://vercel.com/blog">Vercel blog</a></p>')
-  assert.deepEqual(validateDesignArtifactHtml(cited), { ok: true, bytes: Buffer.byteLength(cited) })
+  assert.deepEqual(validateDesignArtifactHtml(cited), { ok: true, bytes: Buffer.byteLength(cited), html: cited })
   assert.match(prepareDesignArtifactHtml(cited, DESIGN_ARTIFACT_EMBEDDED_CSP, 'ready-token'), /type:"open",token,url/)
   const prepared = prepareDesignArtifactHtml(interactive)
   assert.match(prepared, /^<!doctype html><script>/i)
@@ -569,8 +572,44 @@ test('design artifact CSP allows isolated inline scripts and denies ambient capa
   assert.doesNotMatch(DESIGN_ARTIFACT_EMBEDDED_CSP, /allow-same-origin|https?:|style-src[^;]*\*/)
 })
 
+// JavaScript's whitespace (what trim() and \s remove) that the HTML parser does not
+// skip before a doctype: any of these first starts the body.
+const HTML_SPACES = ['\t', '\n', '\f', '\r', ' ']
+const NON_HTML_SPACES = Array.from({ length: 0x10000 }, (_, code) => String.fromCharCode(code))
+  .filter((character) => /\s/.test(character) && !HTML_SPACES.includes(character))
+const codePoint = (character) => `U+${character.charCodeAt(0).toString(16).padStart(4, '0').toUpperCase()}`
+
+test('a design is validated, stored, and rendered as one normalized document, its CSP first in <head>', () => {
+  assert.ok(['\v', '\u00a0', '\u2028', '\u3000', '\ufeff'].every((space) => NON_HTML_SPACES.includes(space)))
+  const cspFirst = '<!doctype html><meta http-equiv="Content-Security-Policy"'
+  for (const space of [...HTML_SPACES, ...NON_HTML_SPACES]) {
+    const variants = [space + SAFE_DESIGN, SAFE_DESIGN + space, SAFE_DESIGN.replace('<!doctype html>', `<!DOCTYPE${space}html${space}>`)]
+    for (const raw of variants) {
+      const label = `${codePoint(space)} in ${JSON.stringify(raw.slice(0, 20))}`
+      const validation = validateDesignArtifactHtml(raw)
+      assert.deepEqual(validation, { ok: true, bytes: Buffer.byteLength(SAFE_DESIGN), html: SAFE_DESIGN }, label)
+      assert.equal(normalizeDesignArtifactHtml(validation.html), validation.html, `${label}: normalizing twice changes nothing`)
+      const rendered = prepareDesignArtifactHtml(raw, DESIGN_ARTIFACT_EMBEDDED_CSP, 'token')
+      assert.ok(rendered.startsWith(cspFirst), label)
+      // A raw design stored before normalization renders exactly like the stored form.
+      assert.equal(rendered, prepareDesignArtifactHtml(validation.html, DESIGN_ARTIFACT_EMBEDDED_CSP, 'token'), label)
+    }
+  }
+})
+
+test('a design that does not start with its doctype is rejected with what it starts with, and never rendered', () => {
+  assertInvalid(`Here is the design:\n${SAFE_DESIGN}`,
+    'design artifact must start with <!doctype html>, but it starts with "Here is the design:\\n<!do…"')
+  // U+200B is invisible but not whitespace, so it is spelled out rather than trimmed.
+  assertInvalid(`\u200b${SAFE_DESIGN}`,
+    'design artifact must start with <!doctype html>, but it starts with "\\u200b<!doctype html><html><h…"')
+  for (const html of [`\u200b${SAFE_DESIGN}`, '<main>fragment</main>', '']) {
+    assert.equal(prepareDesignArtifactHtml(html, DESIGN_ARTIFACT_EMBEDDED_CSP, 'token'), null, JSON.stringify(html.slice(0, 20)))
+  }
+})
+
 test('design artifact validation rejects fragments and oversized documents', () => {
-  assertInvalid('<main>fragment</main>', 'design artifact must start with <!doctype html>')
+  assertInvalid('<main>fragment</main>', 'design artifact must start with <!doctype html>, but it starts with "<main>fragment</main>"')
   const oversized = '<!doctype html><html><head></head><body>' + 'x'.repeat(MAX_DESIGN_ARTIFACT_BYTES) + '</body></html>'
   assertInvalid(oversized, 'design artifact exceeds 512 KiB')
 })
