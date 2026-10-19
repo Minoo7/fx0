@@ -10,12 +10,15 @@ import {
 } from '../lib/design-artifact.ts'
 import {
   applyStreamItem,
+  endActivity,
   groupThreadEntries,
   isPreviewOpenFromSearch,
   mergeSessionView,
   projectSessionView,
+  renameActivity,
   replayEvents,
   shouldAcceptSessionEvent,
+  startActivity,
   upsertSession,
   waitingLabel,
 } from '../components/chat-state.ts'
@@ -458,6 +461,36 @@ test('out-of-order view responses and events cannot roll back the client view', 
   assert.deepEqual(view, { artifactRevision: 4 })
   // An unchanged view keeps its identity, so React skips the update.
   assert.equal(projectSessionView(view, { type: 'artifact', artifactRevision: 4 }), view)
+})
+
+test('a chat keeps its activity start after switching to another chat and back', () => {
+  // What chat-app's effect does on each render: only the chat on screen, showing
+  // no activity, ends its start.
+  const shown = (starts, chatId, active) => (active ? starts : endActivity(starts, chatId))
+  let starts = new Map()
+  starts = startActivity(starts, 'draft', 1_000) // the first prompt of a new chat
+  starts = renameActivity(starts, 'draft', 'chat-a') // the server names the chat
+  starts = shown(starts, 'chat-a', true)
+  starts = shown(starts, 'draft', false) // 30s in: open a new chat
+  starts = shown(starts, 'chat-b', false) // and an idle one
+  starts = shown(starts, 'chat-a', true) // back while it still generates
+  assert.equal(starts.get('chat-a'), 1_000)
+  // A message sent while it is busy keeps the first start.
+  assert.equal(startActivity(starts, 'chat-a', 40_000).get('chat-a'), 1_000)
+
+  // The turn ends on screen: the next send starts its own count.
+  starts = shown(starts, 'chat-a', false)
+  assert.equal(starts.has('chat-a'), false)
+  starts = startActivity(starts, 'chat-a', 60_000)
+  // It ends while another chat is open: coming back to the idle chat drops it.
+  starts = shown(starts, 'draft', false)
+  assert.equal(starts.get('chat-a'), 60_000)
+  starts = shown(starts, 'chat-a', false)
+  assert.equal(startActivity(starts, 'chat-a', 90_000).get('chat-a'), 90_000)
+
+  // No change returns the same map, so React skips the update.
+  assert.equal(endActivity(starts, 'chat-b'), starts)
+  assert.equal(renameActivity(starts, 'draft', 'chat-c'), starts)
 })
 
 test('previous-session events are rejected before sequence dedupe mutates', () => {

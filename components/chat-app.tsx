@@ -46,12 +46,16 @@ import SourceLink from './source-link'
 import {
   DEFAULT_VIEW,
   applyStreamItem,
+  endActivity,
   isPreviewOpenFromSearch,
   joinedMessageId,
   mergeSessionView,
   projectSessionView,
+  renameActivity,
   replayEvents,
+  startActivity,
   upsertSession,
+  type ActivityStarts,
 } from './chat-state'
 import type { ChatEntry } from './thread'
 import Transcript from './transcript'
@@ -281,8 +285,9 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   const [activeTurnId, setActiveTurnId] = useState<number | null>(initialState.activeTurnId)
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(initialState.activeTurnStartedAt)
   // The wait the user feels starts at send, not at the server's turn_start, so the
-  // counter runs through "sending" and "thinking" instead of sitting at 0s.
-  const [sentAt, setSentAt] = useState<number | null>(null)
+  // counter runs through "sending" and "thinking" instead of sitting at 0s. Kept
+  // per chat, so switching to another chat and back doesn't restart it.
+  const [activityStarts, setActivityStarts] = useState<ActivityStarts>(() => new Map())
   const [awaiting, setAwaiting] = useState(false)
   const [authStatus, setAuthStatus] = useState<401 | 403 | null>(null)
   const [signOutStatus, setSignOutStatus] = useState<'pending' | 'failed' | null>(null)
@@ -1215,7 +1220,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     const designPick = targetSession === 'draft' ? composerRef.current?.getDesignMd() ?? null : null
     // The bubble shows at once, before a draft's chat is reserved on the server.
     setAwaiting(true)
-    setSentAt((current) => current ?? Date.now())
+    setActivityStarts((starts) => startActivity(starts, targetSession, Date.now()))
     setInteractionNotice(null)
     setEntries((prev) => [
       ...prev,
@@ -1348,6 +1353,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
         if (admittedTrialChat) createdSummary.trialChat = true
         // Promote the draft in place, unless the user already moved elsewhere.
         cacheSession(created, { transcript: compactTranscript([], DEFAULT_VIEW), summary: createdSummary })
+        setActivityStarts((starts) => renameActivity(starts, targetSession, created))
         if (activeSession.current === targetSession) {
           activeSession.current = created
           setSessionId(created)
@@ -1653,9 +1659,11 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     ?.text?.trim()
 
   const announcement = interactionNotice?.text ?? activityText
+  // Only the chat on screen can end its activity: leaving one mid-turn keeps its start.
   useEffect(() => {
-    if (!activityText) setSentAt(null)
-  }, [activityText])
+    if (!activityText) setActivityStarts((starts) => endActivity(starts, sessionId))
+  }, [activityText, sessionId])
+  const activityStartedAt = activityStarts.get(sessionId) ?? turnStartedAt
   const visibleErrorNotice =
     interactionNotice?.tone === 'error' ? interactionNotice : null
 
@@ -1974,13 +1982,13 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
                   onOpenRevision={canAccessSession ? openRevision : undefined} onSend={sendFromTranscript} />
               ))}
 
-              {activityText && <ActivityLine label={activityText} startedAt={sentAt ?? turnStartedAt} />}
+              {activityText && <ActivityLine label={activityText} startedAt={activityStartedAt} />}
             </div>
           </div>
 
           {previewOpen && activityText && (
             <div className="order-2 shrink-0 border-b border-border px-4 py-2 lg:hidden">
-              <ActivityLine label={activityText} startedAt={sentAt ?? turnStartedAt} />
+              <ActivityLine label={activityText} startedAt={activityStartedAt} />
               {latestAssistantText && (
                 <p className="line-clamp-2 font-mono text-[11px] leading-4 text-foreground-tertiary">
                   {latestAssistantText}
