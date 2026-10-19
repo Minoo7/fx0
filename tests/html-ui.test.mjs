@@ -85,7 +85,7 @@ test('trial first paint offers sign-in, free prompts and a fixed model while ret
   assert.match(markup, />Sign in</)
   assert.doesNotMatch(markup, /Account: You|billing team/)
   assert.match(markup, /3 free prompts left/)
-  assert.match(markup, /disabled="" aria-label="Model: Opus 5\.5 Fast"/)
+  assert.match(markup, /disabled="" aria-label="Model: claude-opus-5\.5(-fast)?"/)
   assert.match(markup, /Guest design|My trial prompt/)
   assert.match(markup, /\/api\/artifact-frame\?session=trial-chat&amp;v=2/)
 })
