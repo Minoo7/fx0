@@ -659,13 +659,15 @@ function composerAt(ui, sessionId, initialGeneration) {
   const composer = renderHooks(Composer)
   const ref = { current: null }
   const base = { ref, persistSettings: true, busy: false, stopping: false, initialGeneration, onSend() {}, onStop() {}, onNewSession() {} }
-  let tree = composer.render({ ...base, sessionId })
+  let knownGeneration
+  const props = () => ({ ...base, sessionId, knownGeneration })
+  let tree = composer.render(props())
   composer.flush()
   ui.cleanups.push(() => composer.cleanup())
   return {
     ref,
-    at(next) { sessionId = next; tree = composer.render({ ...base, sessionId }); composer.flush(); tree = composer.render({ ...base, sessionId }) },
-    render() { tree = composer.render({ ...base, sessionId }); return tree },
+    at(next, known) { sessionId = next; knownGeneration = known; tree = composer.render(props()); composer.flush(); tree = composer.render(props()) },
+    render() { tree = composer.render(props()); return tree },
   }
 }
 
@@ -706,6 +708,30 @@ test('a chat waits for its own model instead of flashing the draft or previous c
   assert.ok(find(view.render(), node => node.props?.['aria-label'] === 'Model: loading'))
   await tick()
   assert.ok(find(view.render(), node => node.props?.['aria-label'] === 'Model: a-model'))
+})
+
+test('switching to a chat the sidebar lists shows its model at once, with no skeleton or request', async (t) => {
+  const ui = browser(t, { '/api/model?session=chat-1': () => Response.json({ model: 'first-model', effort: '', fast: false }) })
+  const view = composerAt(ui, 'chat-1', { model: '', defaultModel: 'default-model', effort: '', fast: false })
+  await tick()
+  assert.ok(find(view.render(), node => node.props?.['aria-label'] === 'Model: first-model'))
+  view.at('chat-2', { model: 'listed-model', effort: 'high', fast: false })
+  const tree = view.render()
+  assert.ok(find(tree, node => node.props?.['aria-label'] === 'Model: listed-model'), 'the listed model shows on the first frame')
+  assert.equal(find(tree, node => node.props?.['aria-label'] === 'Model: loading'), null)
+  assert.equal(ui.requests.some(({ url }) => url === '/api/model?session=chat-2'), false, 'no settings request for a listed chat')
+})
+
+test('switching to a listed chat with no stored model does not write the previous chat\'s model to it', async (t) => {
+  const ui = browser(t, { '/api/model?session=chat-1': () => Response.json({ model: 'first-model', effort: '', fast: false }) })
+  const view = composerAt(ui, 'chat-1', { model: '', defaultModel: 'default-model', effort: '', fast: false })
+  await tick()
+  assert.ok(find(view.render(), node => node.props?.['aria-label'] === 'Model: first-model'))
+  view.at('chat-2', { model: '', effort: '', fast: false })
+  await tick()
+  view.render()
+  const writes = ui.requests.filter(({ url, init }) => url === '/api/model?session=chat-2' && init?.method === 'POST')
+  assert.deepEqual(writes.map(({ init }) => JSON.parse(init.body).model), [], 'no model is written to the chat on a switch')
 })
 
 test('a chat whose settings fail to load shows the current model with the error, not an endless skeleton', async (t) => {
