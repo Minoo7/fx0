@@ -1,0 +1,229 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { registerHooks } from 'node:module'
+
+let moduleId = 0
+const loadUi = () => import(`../components/auth-ui.ts?test=${++moduleId}`)
+
+function storage(entries = []) {
+  const values = new Map(entries)
+  return {
+    get length() { return values.size },
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => values.delete(key),
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    values,
+  }
+}
+
+function browser(t, local = storage(), session = storage()) {
+  const events = []
+  const navigations = []
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
+  const cookies = new Map([['fx0-signed-in', '1']])
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+    get cookie() { return [...cookies].map(([name, value]) => `${name}=${value}`).join('; ') },
+    set cookie(raw) {
+      const [name, value] = raw.split(';')[0].split('=')
+      if (/Max-Age=0(?:;|$)/.test(raw)) cookies.delete(name)
+      else cookies.set(name, value)
+    },
+  } })
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    localStorage: local,
+    sessionStorage: session,
+    dispatchEvent: (event) => { events.push(event); return true },
+    location: { protocol: 'https:', assign: (url) => navigations.push(url) },
+  } })
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, 'window', original)
+    else delete globalThis.window
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument)
+    else delete globalThis.document
+  })
+  return { events, navigations }
+}
+
+test('401 keeps the app and its draft in place, opens no navigation and does not retry', async (t) => {
+  const ui = await loadUi()
+  const local = storage([['fx0-author', 'old user'], ['other-app', 'keep']])
+  const session = storage([['fx0:transcript', 'private']])
+  const { events, navigations } = browser(t, local, session)
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 401 }))
+  await assert.rejects(ui.fetchUi('/api/prompt'), { status: 401 })
+  await assert.rejects(ui.fetchUi('/api/model'), { status: 401 })
+  assert.equal(fetch.mock.callCount(), 1)
+  // Guest mode: the sign-in dialog owns recovery, so a background 401 never
+  // navigates away or discards an unsent draft. Sign-out still clears storage.
+  assert.deepEqual(navigations, [])
+  assert.deepEqual(events.map((event) => [event.type, event.detail]), [[ui.AUTH_REQUIRED_EVENT, 401]])
+})
+
+test('403 requests reauthorization without login navigation or repeated requests', async (t) => {
+  const ui = await loadUi()
+  const { events, navigations } = browser(t)
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 403 }))
+  await assert.rejects(ui.fetchUi('/api/events'), { status: 403, message: /Reauthorize/ })
+  await assert.rejects(ui.fetchUi('/api/sessions'), { status: 403 })
+  assert.equal(fetch.mock.callCount(), 1)
+  assert.deepEqual(navigations, [])
+  assert.equal(events[0].detail, 403)
+})
+
+test('ordinary API errors stay with the owning UI and do not close the auth gate', async (t) => {
+  const ui = await loadUi()
+  const { events } = browser(t)
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 503 }))
+  assert.equal((await ui.fetchUi('/api/model')).status, 503)
+  assert.equal((await ui.fetchUi('/api/model')).status, 503)
+  assert.equal(fetch.mock.callCount(), 2)
+  assert.deepEqual(events, [])
+})
+
+test('storage cleanup is app-scoped and tolerates unavailable storage', async (t) => {
+  const ui = await loadUi()
+  const session = storage([['fx0', 'private'], ['fx0.session', 'private'], ['fx0-other', 'private'], ['fx00-other', 'keep']])
+  browser(t, storage(), session)
+  Object.defineProperty(window, 'localStorage', { get() { throw new Error('Blocked') } })
+  assert.doesNotThrow(ui.clearUserStorage)
+  assert.deepEqual([...session.values], [['fx00-other', 'keep']])
+})
+
+test('successful signout POST clears private state before returning to the guest app', async (t) => {
+  const ui = await loadUi()
+  const local = storage([['fx0-history', 'private']])
+  const session = storage([['fx0:session', 'private']])
+  const { navigations } = browser(t, local, session)
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 200 }))
+  let clearedMemory = false
+  await ui.signOutAccount(() => {
+    assert.equal(local.length, 0)
+    assert.equal(session.length, 0)
+    assert.deepEqual(navigations, [])
+    clearedMemory = true
+  })
+  assert.deepEqual(fetch.mock.calls[0].arguments, ['/api/auth/signout', { method: 'POST', keepalive: true }])
+  assert.equal(clearedMemory, true)
+  assert.deepEqual(navigations, ['/'])
+})
+
+test('signout remains available after team permission rejection', async (t) => {
+  const ui = await loadUi()
+  const { navigations } = browser(t)
+  t.mock.method(globalThis, 'fetch', async (url) => new Response(null, { status: url === '/api/auth/signout' ? 200 : 403 }))
+  await assert.rejects(ui.fetchUi('/api/prompt'), { status: 403 })
+  await ui.signOutAccount(() => {})
+  assert.deepEqual(navigations, ['/'])
+})
+
+test('failed signout keeps private state hidden, reports failure and permits an explicit retry', async (t) => {
+  const ui = await loadUi()
+  const local = storage([['fx0-history', 'private']])
+  const { navigations } = browser(t, local)
+  t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 503 }))
+  let cleared = 0
+  await assert.rejects(ui.signOutAccount(() => { cleared++ }), /Unable to sign out/)
+  assert.equal(cleared, 1)
+  assert.equal(local.length, 0)
+  assert.deepEqual(navigations, [])
+  assert.match(document.cookie, /fx0-signout-pending=1/, 'failure preserves logout intent for reload/retry')
+  await assert.rejects(ui.fetchUi('/api/sessions'), { status: 401 })
+  t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 200 }))
+  await ui.signOutAccount(() => { cleared++ })
+  assert.equal(cleared, 2)
+  assert.deepEqual(navigations, ['/'])
+})
+
+test('optimistic signout hides private state synchronously while the server response is unresolved', async (t) => {
+  const ui = await loadUi()
+  const local = storage([['fx0-history', 'private']])
+  const { navigations } = browser(t, local)
+  const response = Promise.withResolvers()
+  const fetch = t.mock.method(globalThis, 'fetch', () => response.promise)
+  let cleared = false
+  const pending = ui.signOutAccount(() => { cleared = true })
+  assert.equal(cleared, true, 'the click must clear the UI without awaiting fetch')
+  assert.match(document.cookie, /fx0-signout-pending=1/, 'a refresh must carry logout intent before the POST finishes')
+  assert.doesNotMatch(document.cookie, /fx0-signed-in=1/, 'first paint must also reflect the logout')
+  assert.equal(local.length, 0)
+  assert.deepEqual(navigations, [], 'do not reload while cookies still carry the old session')
+  await assert.rejects(ui.fetchUi('/api/prompt'), { status: 401 })
+  assert.equal(fetch.mock.callCount(), 1)
+  response.resolve(new Response(null, { status: 200 }))
+  await pending
+  assert.deepEqual(navigations, ['/'])
+})
+
+test('signout aborts in-flight private requests and rejects a late response even when fetch ignores abort', async (t) => {
+  const ui = await loadUi()
+  browser(t)
+  const response = Promise.withResolvers()
+  let signal
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    if (url === '/api/auth/signout') return Promise.resolve(new Response(null, { status: 503 }))
+    signal = init.signal
+    return response.promise
+  })
+  const request = ui.fetchUi('/api/sessions')
+  const rejected = assert.rejects(request, { status: 401 })
+  assert.equal(signal.aborted, false)
+  await assert.rejects(ui.signOutAccount(() => {}), /Unable to sign out/)
+  assert.equal(signal.aborted, true)
+  response.resolve(Response.json({ sessions: ['private'] }))
+  await rejected
+})
+
+test('invalidating private caches discards a response whose body finishes after signout', async (t) => {
+  const hook = registerHooks({ resolve(specifier, context, next) {
+    if (specifier === './auth-ui' && context.parentURL?.includes('/components/cached-fetch.ts')) {
+      return next(new URL('../components/auth-ui.ts', import.meta.url).href, context)
+    }
+    return next(specifier, context)
+  } })
+  t.after(() => hook.deregister())
+  const cache = await import('../components/cached-fetch.ts')
+  browser(t)
+  const body = Promise.withResolvers()
+  const reading = Promise.withResolvers()
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json() { reading.resolve(); return body.promise } }))
+  const pending = cache.loadCached('fx0:cache:teams:owner', '/api/teams', 0)
+  await reading.promise
+  cache.invalidateCached('fx0:')
+  body.resolve({ teams: ['private team'] })
+  assert.equal(await pending, null)
+  assert.equal(cache.readCached('fx0:cache:teams:owner'), null)
+  assert.equal(window.sessionStorage.getItem('fx0:cache:teams:owner'), null)
+})
+
+test('event stream preserves split UTF-8, LF/CRLF frames and multiline SSE data', async () => {
+  const ui = await loadUi()
+  const wire = ': keepalive\r\n\r\ndata: {"type":"text","delta":"Diseño"}\r\n\r\ndata: first\ndata: second\n\n'
+  const bytes = new TextEncoder().encode(wire)
+  const body = new ReadableStream({ start(controller) {
+    for (const byte of bytes) controller.enqueue(Uint8Array.of(byte))
+    controller.close()
+  } })
+  const frames = []
+  await ui.readEventStream(new Response(body), (data) => frames.push(data))
+  assert.deepEqual(frames, ['{"type":"text","delta":"Diseño"}', 'first\nsecond'])
+  assert.equal(body.locked, false)
+})
+
+test('event stream releases the reader if ingestion fails', async () => {
+  const ui = await loadUi()
+  let cancelled = false
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('data: event\n\n')) },
+    cancel() { cancelled = true },
+  })
+  await assert.rejects(ui.readEventStream(new Response(body), () => { throw new Error('Failed ingestion') }), /Failed ingestion/)
+  assert.equal(cancelled, true)
+  assert.equal(body.locked, false)
+})
+
+test('event stream reports missing response bodies', async () => {
+  const ui = await loadUi()
+  await assert.rejects(ui.readEventStream(new Response(null), () => {}), /unavailable/)
+})
