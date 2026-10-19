@@ -351,6 +351,57 @@ test('the first prompt response retains trial eligibility when a signed-in draft
   assert.equal(ui.requests.some(({ url }) => url === '/api/session?session=admitted-trial'), false)
 })
 
+// The browser pressing Back or Forward to `search`.
+function navigate(search) {
+  window.location.href = `http://localhost/${search}`
+  window.location.search = search
+  window.dispatchEvent(new Event('popstate'))
+}
+
+test('Back from a chat to the new-chat page shows a new chat, keeps what was typed, and its next prompt starts a new chat', async (t) => {
+  t.mock.method(console, 'info', () => {})
+  const ui = browser(t, {
+    '/api/events?session=chat-a&after=1': () => new Response(''),
+    '/api/prompt?session=new': () => new Response('', { headers: { 'content-type': 'text/event-stream', 'x-fx0-session': 'chat-b' } }),
+    '/api/events?session=chat-b&after=0': () => new Response(''),
+  })
+  const app = mount(t, ui, {
+    ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null }, sessionId: 'chat-a',
+    sessions: [{ id: 'chat-a', title: 'chat-a', createdAt: 1, lastActivity: 1, busy: false }],
+    events: [{ type: 'user', seq: 1, id: 1, text: 'Earlier design' }],
+  })
+  await tick()
+  app.render()
+  app.handle().restoreDraft(draft)
+  navigate('')
+  await tick()
+  app.render()
+  assert.equal(find(app.tree(), (node) => node.type === Transcript).props.sessionId, 'draft')
+  assert.deepEqual(app.handle().getDraft(), { ...draft, designMd: null }, 'Back keeps what was typed')
+  app.send()
+  await tick()
+  app.render()
+  assert.deepEqual(ui.requests.filter(({ url }) => url.startsWith('/api/prompt')).map(({ url }) => url), ['/api/prompt?session=new'])
+  assert.equal(ui.requests.some(({ url }) => url.startsWith('/api/session?')), false, 'Back loads no chat')
+})
+
+test('Back to a link whose chat ID is invalid shows a new chat with the first paint\'s notice', async (t) => {
+  t.mock.method(console, 'info', () => {})
+  const ui = browser(t, { '/api/events?session=chat-a&after=1': () => new Response('') })
+  const app = mount(t, ui, {
+    ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null }, sessionId: 'chat-a',
+    events: [{ type: 'user', seq: 1, id: 1, text: 'Earlier design' }],
+  })
+  await tick()
+  app.render()
+  navigate('?s=Not-A-Chat')
+  await tick()
+  app.render()
+  assert.equal(find(app.tree(), (node) => node.type === Transcript).props.sessionId, 'draft')
+  assert.equal(find(app.tree(), (node) => node.props?.role === 'status' && node.props['aria-live'] === 'polite').props.children, 'That chat does not exist or is not yours.')
+  assert.equal(ui.requests.some(({ url }) => url.startsWith('/api/session?')), false)
+})
+
 test('account bootstrap clears a stale signed-in hint after the account is known', (t) => {
   const ui = browser(t)
   document.cookie = 'fx0-signed-in=1'

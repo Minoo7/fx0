@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { urlChat } from '../lib/session-id.ts'
 import './runtime.test.mjs'
 import {
   DESIGN_ARTIFACT_EMBEDDED_CSP,
@@ -720,4 +721,14 @@ test('the first user bubble shows the design.md only when the server applied it'
     { type: 'user', id: 1, seq: 1, text: 'Design a page', designMd: { name: 'Stripe', source: 'getdesign:stripe' } },
   ])
   assert.equal(replayed.entries[0].designMd, 'Stripe')
+})
+
+test('a page URL opens a chat only when its s names one, by the first paint\'s rule', () => {
+  assert.deepEqual(urlChat(''), { kind: 'new' })
+  assert.deepEqual(urlChat('?preview=1'), { kind: 'new' })
+  assert.deepEqual(urlChat('?s=0f8e2a3c-1b2d-4c5e-8f90-123456789abc&preview=1'), { kind: 'chat', id: '0f8e2a3c-1b2d-4c5e-8f90-123456789abc' })
+  // An s that cannot name a chat is never cleaned up into one, and never `lobby`.
+  for (const search of ['?s=', '?s=Chat-A', '?s=..%2Fchat', `?s=${'a'.repeat(41)}`]) {
+    assert.deepEqual(urlChat(search), { kind: 'invalid' }, search)
+  }
 })
