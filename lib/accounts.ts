@@ -1,4 +1,9 @@
 // Server-only account metadata and authoritative chat ownership; no OAuth tokens.
+// @ts-expect-error Node strip-types tests require the source extension.
+import { validSessionId } from './session-id.ts'
+
+export { validSessionId }
+
 export interface AccountUser {
   id: string
   name: string
@@ -40,10 +45,6 @@ export async function withAccountDatabase<T>(work: (query: AccountQuery) => Prom
   const sql = neon(connectionString)
   return work(async (text, values = []) => await sql.query(text, values,
     timeoutMs ? { fetchOptions: { signal: AbortSignal.timeout(timeoutMs) } } : undefined) as Record<string, unknown>[])
-}
-
-export function validSessionId(id: unknown): id is string {
-  return typeof id === 'string' && /^[a-z0-9-]{1,40}$/.test(id)
 }
 
 export function isNewSessionId(id: unknown): id is string {

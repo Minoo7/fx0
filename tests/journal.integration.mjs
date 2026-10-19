@@ -219,11 +219,11 @@ test('journal Redis integration uses isolated durable session state', async (t) 
 
     await t.test('a turn end clears only its own turn', async () => {
       const sessionId = 'active-turn'
-      const turn = { id: 2, startedAt: 1, billingTeamId: 'team_a', prompt: 'p', startSeq: 3 }
-      await journal.setActiveTurn(sessionId, turn)
-      await journal.clearActiveTurn(sessionId, 1)
-      assert.deepEqual(await journal.getActiveTurn(sessionId), turn)
-      await journal.clearActiveTurn(sessionId, 2)
+      const start = { id: 2, startedAt: 1, billingTeamId: 'team_a', prompt: 'p' }
+      const [item] = await journal.projectEvents(sessionId, 0, 1, [{ type: 'turn_start', id: 2, turnId: 2, at: 1 }], { 2: start })
+      await journal.projectEvents(sessionId, 1, 2, [{ type: 'done', id: 1, turnId: 1, at: 2 }])
+      assert.deepEqual(await journal.getActiveTurn(sessionId), { ...start, startSeq: item.seq })
+      await journal.projectEvents(sessionId, 2, 3, [{ type: 'done', id: 2, turnId: 2, at: 3 }])
       assert.equal(await journal.getActiveTurn(sessionId), null)
     })
 
@@ -232,9 +232,9 @@ test('journal Redis integration uses isolated durable session state', async (t) 
       await journal.updateSession(id, { preferredEffort: null })
       await journal.appendEvent(id, { type: 'status', text: 'before deletion' })
       await journal.bindLibfxSession(id, 'wrun_deleted')
-      await journal.setActiveTurn(id, { id: 1, startedAt: 1, billingTeamId: null, prompt: '', startSeq: 1 })
+      await journal.projectEvents(id, 0, 1, [{ type: 'turn_start', id: 1, turnId: 1, at: 1 }], { 1: { id: 1, startedAt: 1, billingTeamId: null, prompt: '' } })
       assert.equal(await journal.claimSessionCleanup(id, randomUUID()), 'busy')
-      await journal.clearActiveTurn(id, 1)
+      await journal.projectEvents(id, 1, 2, [{ type: 'done', id: 1, turnId: 1, at: 2 }])
       const token = randomUUID()
       assert.equal(await journal.claimSessionCleanup(id, token), 'claimed')
       await journal.releaseSessionCleanup(id, token)
@@ -287,8 +287,8 @@ test('journal Redis integration uses isolated durable session state', async (t) 
         userId: 'user-a', loginId, loginAt: 1, email: 'a@example.com', accessToken, teamId: 'team_a',
         expiresAt: Date.now() + 120_000, isLoggedIn: true, refreshToken: 'refresh-never-stored',
       })
-      await credentials.saveTurnCredential('cred-laptop', session('login-laptop', 'access-laptop-secret'))
-      await credentials.saveTurnCredential('cred-phone', session('login-phone', 'access-phone-secret'))
+      await credentials.saveTurnCredential('cred-laptop', session('login-laptop', 'access-laptop-secret'), 1)
+      await credentials.saveTurnCredential('cred-phone', session('login-phone', 'access-phone-secret'), 1)
       const raw = await redis.get(`${prefix}:credential:cred-laptop`)
       assert.equal(typeof raw, 'string')
       assert.ok(!raw.includes('access-laptop-secret') && !raw.includes('refresh-never-stored'), 'sealed, never plaintext')
@@ -303,10 +303,12 @@ test('journal Redis integration uses isolated durable session state', async (t) 
       assert.equal(await credentials.readTurnCredential('cred-laptop'), null, 'another secret cannot unseal it')
       process.env.SESSION_SECRET = secret
 
-      assert.deepEqual(await credentials.dropLoginCredentials('login-laptop'), ['cred-laptop'])
+      assert.deepEqual(await credentials.dropLoginCredentials('login-laptop'), [{ chatId: 'cred-laptop', turns: 1, latest: 'deleted' }])
       assert.equal(await credentials.readTurnCredential('cred-laptop'), null)
+      assert.equal((await credentials.readExecutionFunding('cred-laptop', 1)).ok, false)
+      assert.equal(await redis.hlen(`${prefix}:funding:cred-laptop`), 1, 'sign-out keeps the funding record')
       assert.equal((await credentials.readTurnCredential('cred-phone'))?.accessToken, 'access-phone-secret')
-      await credentials.saveTurnCredential('cred-expired', { ...session('login-x', 'x'), expiresAt: Date.now() - 1 })
+      await assert.rejects(credentials.saveTurnCredential('cred-expired', { ...session('login-x', 'x'), expiresAt: Date.now() - 1 }, 1), /Sign in again/)
       assert.equal(await credentials.readTurnCredential('cred-expired'), null, 'an expired token is never stored')
     })
   } finally {

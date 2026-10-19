@@ -72,9 +72,10 @@ export function createHistoryStore(query: AccountQuery) {
   }
 }
 
-// History is written after Redis commits the turn, so a failed write has no later
-// chance. The inserts are idempotent (ON CONFLICT DO NOTHING), so retrying is safe;
-// each attempt is bounded so a stalled database cannot hold the worker.
+// History is written from the work a turn's end leaves in Redis, which stays until
+// the write succeeds, so a later follower retries a failed one. The inserts are
+// idempotent (ON CONFLICT DO NOTHING), so retrying is safe; each attempt is bounded
+// so a stalled database cannot hold the worker.
 const WRITE_ATTEMPTS = 3
 const WRITE_TIMEOUT_MS = 5_000
 

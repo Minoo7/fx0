@@ -10,6 +10,15 @@ import { NextRequest } from 'next/server.js'
 // bundler. This only resolves paths, not replacement implementations.
 registerHooks({ resolve(specifier, context, next) {
   if (specifier === '@/lib/turn-credential' && context.parentURL?.endsWith('/api/auth/signout/route.ts')) return { url: 'data:text/javascript,export async function revokeLoginCredentials() {}', shortCircuit: true }
+  // Session readers check sign-out revocation in the credential store's Redis;
+  // these tests hold it in memory (globalThis.__revokedLogins).
+  if (specifier === './turn-credential.ts' && /\/lib\/(auth|request-session)\.ts$/.test(context.parentURL ?? '')) {
+    return { url: `data:text/javascript,${encodeURIComponent('export async function loginRevoked(id) { const r = globalThis.__revokedLogins; r.checks.push(id); if (r.fail) throw new Error("synthetic revocation read failure"); return r.ids.has(id) }')}`, shortCircuit: true }
+  }
+  // Pages read cookies from next/headers; a test hands them a request's jar.
+  if (specifier === 'next/headers.js' && context.parentURL?.endsWith('/lib/secure-session.ts')) {
+    return { url: `data:text/javascript,${encodeURIComponent('export async function cookies() { return globalThis.__pageCookies ?? new Map() }')}`, shortCircuit: true }
+  }
   if (specifier === '@/lib/agent') return { url: 'data:text/javascript,export async function cancelUserRuntime(id) { globalThis.__signedOutUser = id }', shortCircuit: true }
   if (specifier.startsWith('@/lib/')) return next(new URL(`../${specifier.slice(2)}.ts`, import.meta.url).href, context)
   // after() needs a Next request scope; the sign-out's follow-up runs at once and tests await it.
@@ -37,6 +46,15 @@ const secure = await import('../lib/secure-session.ts')
 const auth = await import('../lib/auth.ts')
 const { withRequestSession } = await import('../lib/request-session.ts')
 const { withChatRoute, withUserRoute } = await import('../lib/route-auth.ts')
+const noRevocations = () => ({ ids: new Set(), checks: [], fail: false })
+globalThis.__revokedLogins = noRevocations()
+// Logins sign-out has revoked, for one test.
+function revocations(t) {
+  const revoked = noRevocations()
+  globalThis.__revokedLogins = revoked
+  t.after(() => { globalThis.__revokedLogins = noRevocations() })
+  return revoked
+}
 const handledRequests = new WeakMap()
 async function requestSession(request) {
   let handled
@@ -355,21 +373,62 @@ test('request cleanup bounds obsolete grant deletions and never touches selector
   assert.deepEqual(await secure.getSessionFromRequest(forwardedRequest(cleanup)), {})
 })
 
-test('refresh floor covers 800s routes; ordinary requests perform no network or cookie writes', async (t) => {
+test('refresh floor covers 800s routes; ordinary requests refresh nothing and write no cookies', async (t) => {
   assert.equal(protocol.MIN_GATEWAY_VALIDITY_MS, 15 * 60_000)
   assert.ok(protocol.MIN_GATEWAY_VALIDITY_MS > 800 * 1000)
   const now = Date.now()
   assert.equal(auth.needsTokenRefresh(session({ expiresAt: now + protocol.MIN_GATEWAY_VALIDITY_MS + 1 }), now), false)
   assert.equal(auth.needsTokenRefresh(session({ expiresAt: now + protocol.MIN_GATEWAY_VALIDITY_MS }), now), true)
-  t.mock.method(globalThis, 'fetch', async () => assert.fail('ordinary auth must remain cookie-only'))
+  const revoked = revocations(t)
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('ordinary auth makes no refresh request'))
   const request = await requestWithSession('/api/prompt', session({ expiresAt: now + 3600_000 }))
   const response = await requestSession(request)
   assert.ok(handledRequests.has(response))
   assert.equal(response.headers.get('set-cookie'), null)
+  assert.deepEqual(revoked.checks, [session().loginId], 'its one store read is the sign-out check')
   assert.deepEqual(await auth.resolveGrantedTeam(session()), { teamId: 'team_granted', teamSlug: 'granted' })
   assert.deepEqual((await (await me(request)).json()).user, auth.publicUser(session()))
   assert.deepEqual(Object.keys(auth.publicUser(session())), ['id', 'name', 'email', 'picture'])
   await assert.rejects(auth.resolveGrantedTeam(session({ teamId: undefined })), (error) => error instanceof AuthError && error.status === 403)
+})
+
+test('a signed-out login\'s grant replayed from a copy is no session for API routes: no refresh, and its cookie is cleared', async (t) => {
+  const revoked = revocations(t)
+  // Within the refresh floor: a live grant would refresh here.
+  const grant = session({ expiresAt: Date.now() + 60_000 })
+  revoked.ids.add(grant.loginId)
+  // Refresh contains its own errors, so count requests rather than fail in one.
+  const network = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 500 }))
+  const response = await requestSession(await requestWithSession('/api/prompt', grant))
+  assert.equal(network.mock.callCount(), 0, 'a revoked grant never refreshes')
+  assert.equal(response.status, 200)
+  assert.deepEqual(handledRequests.get(response).session, {})
+  const grantCookie = secure.grantCookieName(grant.loginId)
+  assert.ok(response.headers.getSetCookie().some((value) => value.startsWith(`${grantCookie}=`) && value.includes('Max-Age=0')))
+  assert.equal(forwardedRequest(response).cookies.has(grantCookie), false)
+  assert.equal((await (await me(await requestWithSession('/api/auth/me', grant))).json()).user, null)
+})
+
+test('API routes fail closed when the sign-out check is unavailable', async (t) => {
+  const revoked = revocations(t)
+  revoked.fail = true
+  const network = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 500 }))
+  const response = await requestSession(await requestWithSession('/api/prompt', session()))
+  assert.equal(response.status, 503)
+  assert.equal(handledRequests.has(response), false)
+  assert.equal(network.mock.callCount(), 0, 'no refresh without the sign-out check')
+})
+
+test('pages read no session from a signed-out login\'s grant', async (t) => {
+  const revoked = revocations(t)
+  const grant = session({ expiresAt: Date.now() + 3600_000 })
+  globalThis.__pageCookies = (await requestWithSession('/', grant)).cookies
+  t.after(() => { delete globalThis.__pageCookies })
+  assert.equal((await auth.requireUserSession()).loginId, grant.loginId)
+  revoked.ids.add(grant.loginId)
+  await assert.rejects(auth.requireUserSession(), (error) => error instanceof AuthError && error.status === 401)
+  revoked.fail = true
+  await assert.rejects(auth.requireUserSession(), /synthetic revocation read failure/, 'an unavailable check is no session either')
 })
 
 // In-memory REST endpoint exercises the REAL installed Redis adapter and request wrapper,

@@ -1,26 +1,64 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { urlChat } from '../lib/session-id.ts'
 import './runtime.test.mjs'
 import {
   DESIGN_ARTIFACT_EMBEDDED_CSP,
   MAX_DESIGN_ARTIFACT_BYTES,
+  normalizeDesignArtifactHtml,
   prepareDesignArtifactHtml,
   validateDesignArtifactHtml,
 } from '../lib/design-artifact.ts'
 import {
   applyStreamItem,
+  endActivity,
   groupThreadEntries,
   isPreviewOpenFromSearch,
   mergeSessionView,
   projectSessionView,
+  renameActivity,
   replayEvents,
   shouldAcceptSessionEvent,
+  startActivity,
   upsertSession,
   waitingLabel,
 } from '../components/chat-state.ts'
 import { createTools } from '../lib/tools.ts'
 import { featuredModels } from '../lib/featured-models.ts'
-import { readFileSync } from 'node:fs'
+import { designLinkUrl, MAX_DESIGN_LINK_LENGTH } from '../lib/design-link.ts'
+
+test('a design may only ask to open a whole https address, shown in full before it opens', () => {
+  assert.equal(designLinkUrl('https://vercel.com/blog?ref=design#top'), 'https://vercel.com/blog?ref=design#top')
+  assert.equal(designLinkUrl('https://EXAMPLE.com'), 'https://example.com/', 'the dialog shows the address the browser opens')
+  for (const value of [
+    'http://example.com', 'javascript:alert(1)', 'data:text/html,hi', 'https://user:secret@example.com',
+    'https://user@example.com', '//example.com', 'not a url', '', null, undefined, 42, { href: 'https://example.com' },
+  ]) {
+    assert.equal(designLinkUrl(value), null, JSON.stringify(value) ?? String(value))
+  }
+  const longest = `https://example.com/?q=${'a'.repeat(MAX_DESIGN_LINK_LENGTH - 'https://example.com/?q='.length)}`
+  assert.equal(designLinkUrl(longest), longest)
+  assert.equal(designLinkUrl(`${longest}a`), null, 'too long to show whole')
+  // An address that only grows past the limit once the browser encodes it is refused too.
+  const spaced = `https://example.com/?q=a${' '.repeat(1000)}b`
+  assert.ok(spaced.length <= MAX_DESIGN_LINK_LENGTH && new URL(spaced).href.length > MAX_DESIGN_LINK_LENGTH)
+  assert.equal(designLinkUrl(spaced), null)
+})
+import { readdirSync, readFileSync } from 'node:fs'
+
+test('the libfx wake route stays private, so only Vercel Queues can deliver to it', () => {
+  // A function with a queue trigger has no public URL on Vercel. Its handler acts on
+  // the delivery it is handed: the bundled queue client runs libfx before the broker
+  // confirms the receipt. So the trigger is what keeps forged deliveries out.
+  const config = JSON.parse(readFileSync(new URL('../vercel.json', import.meta.url), 'utf8'))
+  const triggers = config.functions?.['app/api/libfx/route.ts']?.experimentalTriggers ?? []
+  assert.deepEqual(triggers.map(({ type, topic }) => ({ type, topic })), [{ type: 'queue/v2beta', topic: '__libfx_wkf_workflow_session' }])
+  // No other route serves the wake handler, since one without the trigger would be public.
+  const routes = readdirSync(new URL('../app', import.meta.url), { recursive: true })
+    .filter((path) => /(^|\/)route\.tsx?$/.test(path))
+  const serving = routes.filter((path) => readFileSync(new URL(`../app/${path}`, import.meta.url), 'utf8').includes('wakeHandler('))
+  assert.deepEqual(serving, ['api/libfx/route.ts'])
+})
 import { DESIGN_MD_CATALOG, DESIGN_MD_MAX_BYTES, parseDesignMdRequest } from '../lib/design-md.ts'
 
 function toolHost() {
@@ -440,6 +478,36 @@ test('out-of-order view responses and events cannot roll back the client view', 
   assert.equal(projectSessionView(view, { type: 'artifact', artifactRevision: 4 }), view)
 })
 
+test('a chat keeps its activity start after switching to another chat and back', () => {
+  // What chat-app's effect does on each render: only the chat on screen, showing
+  // no activity, ends its start.
+  const shown = (starts, chatId, active) => (active ? starts : endActivity(starts, chatId))
+  let starts = new Map()
+  starts = startActivity(starts, 'draft', 1_000) // the first prompt of a new chat
+  starts = renameActivity(starts, 'draft', 'chat-a') // the server names the chat
+  starts = shown(starts, 'chat-a', true)
+  starts = shown(starts, 'draft', false) // 30s in: open a new chat
+  starts = shown(starts, 'chat-b', false) // and an idle one
+  starts = shown(starts, 'chat-a', true) // back while it still generates
+  assert.equal(starts.get('chat-a'), 1_000)
+  // A message sent while it is busy keeps the first start.
+  assert.equal(startActivity(starts, 'chat-a', 40_000).get('chat-a'), 1_000)
+
+  // The turn ends on screen: the next send starts its own count.
+  starts = shown(starts, 'chat-a', false)
+  assert.equal(starts.has('chat-a'), false)
+  starts = startActivity(starts, 'chat-a', 60_000)
+  // It ends while another chat is open: coming back to the idle chat drops it.
+  starts = shown(starts, 'draft', false)
+  assert.equal(starts.get('chat-a'), 60_000)
+  starts = shown(starts, 'chat-a', false)
+  assert.equal(startActivity(starts, 'chat-a', 90_000).get('chat-a'), 90_000)
+
+  // No change returns the same map, so React skips the update.
+  assert.equal(endActivity(starts, 'chat-b'), starts)
+  assert.equal(renameActivity(starts, 'draft', 'chat-c'), starts)
+})
+
 test('previous-session events are rejected before sequence dedupe mutates', () => {
   const seen = new Set([1])
   assert.equal(shouldAcceptSessionEvent('active', 'previous', { type: 'error', seq: 2 }, seen), false)
@@ -453,6 +521,7 @@ test('design artifact validation accepts inline CSS, JavaScript, Canvas, data as
   assert.deepEqual(validateDesignArtifactHtml(SAFE_DESIGN), {
     ok: true,
     bytes: Buffer.byteLength(SAFE_DESIGN),
+    html: SAFE_DESIGN,
   })
   const interactive = documentWith(
     '<canvas id="scene"></canvas><button onclick="cancelAnimationFrame(window.frame)">Pause</button><script>const canvas=document.querySelector("#scene"); const context=canvas.getContext("2d"); context.fillRect(0,0,10,10); window.frame=requestAnimationFrame(() => {}); const example="<iframe src=https://example.com></iframe>";</script>',
@@ -460,9 +529,10 @@ test('design artifact validation accepts inline CSS, JavaScript, Canvas, data as
   assert.deepEqual(validateDesignArtifactHtml(interactive), {
     ok: true,
     bytes: Buffer.byteLength(interactive),
+    html: interactive,
   })
   const cited = documentWith('<p>Source: <a href="https://vercel.com/blog">Vercel blog</a></p>')
-  assert.deepEqual(validateDesignArtifactHtml(cited), { ok: true, bytes: Buffer.byteLength(cited) })
+  assert.deepEqual(validateDesignArtifactHtml(cited), { ok: true, bytes: Buffer.byteLength(cited), html: cited })
   assert.match(prepareDesignArtifactHtml(cited, DESIGN_ARTIFACT_EMBEDDED_CSP, 'ready-token'), /type:"open",token,url/)
   const prepared = prepareDesignArtifactHtml(interactive)
   assert.match(prepared, /^<!doctype html><script>/i)
@@ -569,8 +639,44 @@ test('design artifact CSP allows isolated inline scripts and denies ambient capa
   assert.doesNotMatch(DESIGN_ARTIFACT_EMBEDDED_CSP, /allow-same-origin|https?:|style-src[^;]*\*/)
 })
 
+// JavaScript's whitespace (what trim() and \s remove) that the HTML parser does not
+// skip before a doctype: any of these first starts the body.
+const HTML_SPACES = ['\t', '\n', '\f', '\r', ' ']
+const NON_HTML_SPACES = Array.from({ length: 0x10000 }, (_, code) => String.fromCharCode(code))
+  .filter((character) => /\s/.test(character) && !HTML_SPACES.includes(character))
+const codePoint = (character) => `U+${character.charCodeAt(0).toString(16).padStart(4, '0').toUpperCase()}`
+
+test('a design is validated, stored, and rendered as one normalized document, its CSP first in <head>', () => {
+  assert.ok(['\v', '\u00a0', '\u2028', '\u3000', '\ufeff'].every((space) => NON_HTML_SPACES.includes(space)))
+  const cspFirst = '<!doctype html><meta http-equiv="Content-Security-Policy"'
+  for (const space of [...HTML_SPACES, ...NON_HTML_SPACES]) {
+    const variants = [space + SAFE_DESIGN, SAFE_DESIGN + space, SAFE_DESIGN.replace('<!doctype html>', `<!DOCTYPE${space}html${space}>`)]
+    for (const raw of variants) {
+      const label = `${codePoint(space)} in ${JSON.stringify(raw.slice(0, 20))}`
+      const validation = validateDesignArtifactHtml(raw)
+      assert.deepEqual(validation, { ok: true, bytes: Buffer.byteLength(SAFE_DESIGN), html: SAFE_DESIGN }, label)
+      assert.equal(normalizeDesignArtifactHtml(validation.html), validation.html, `${label}: normalizing twice changes nothing`)
+      const rendered = prepareDesignArtifactHtml(raw, DESIGN_ARTIFACT_EMBEDDED_CSP, 'token')
+      assert.ok(rendered.startsWith(cspFirst), label)
+      // A raw design stored before normalization renders exactly like the stored form.
+      assert.equal(rendered, prepareDesignArtifactHtml(validation.html, DESIGN_ARTIFACT_EMBEDDED_CSP, 'token'), label)
+    }
+  }
+})
+
+test('a design that does not start with its doctype is rejected with what it starts with, and never rendered', () => {
+  assertInvalid(`Here is the design:\n${SAFE_DESIGN}`,
+    'design artifact must start with <!doctype html>, but it starts with "Here is the design:\\n<!do…"')
+  // U+200B is invisible but not whitespace, so it is spelled out rather than trimmed.
+  assertInvalid(`\u200b${SAFE_DESIGN}`,
+    'design artifact must start with <!doctype html>, but it starts with "\\u200b<!doctype html><html><h…"')
+  for (const html of [`\u200b${SAFE_DESIGN}`, '<main>fragment</main>', '']) {
+    assert.equal(prepareDesignArtifactHtml(html, DESIGN_ARTIFACT_EMBEDDED_CSP, 'token'), null, JSON.stringify(html.slice(0, 20)))
+  }
+})
+
 test('design artifact validation rejects fragments and oversized documents', () => {
-  assertInvalid('<main>fragment</main>', 'design artifact must start with <!doctype html>')
+  assertInvalid('<main>fragment</main>', 'design artifact must start with <!doctype html>, but it starts with "<main>fragment</main>"')
   const oversized = '<!doctype html><html><head></head><body>' + 'x'.repeat(MAX_DESIGN_ARTIFACT_BYTES) + '</body></html>'
   assertInvalid(oversized, 'design artifact exceeds 512 KiB')
 })
@@ -615,4 +721,14 @@ test('the first user bubble shows the design.md only when the server applied it'
     { type: 'user', id: 1, seq: 1, text: 'Design a page', designMd: { name: 'Stripe', source: 'getdesign:stripe' } },
   ])
   assert.equal(replayed.entries[0].designMd, 'Stripe')
+})
+
+test('a page URL opens a chat only when its s names one, by the first paint\'s rule', () => {
+  assert.deepEqual(urlChat(''), { kind: 'new' })
+  assert.deepEqual(urlChat('?preview=1'), { kind: 'new' })
+  assert.deepEqual(urlChat('?s=0f8e2a3c-1b2d-4c5e-8f90-123456789abc&preview=1'), { kind: 'chat', id: '0f8e2a3c-1b2d-4c5e-8f90-123456789abc' })
+  // An s that cannot name a chat is never cleaned up into one, and never `lobby`.
+  for (const search of ['?s=', '?s=Chat-A', '?s=..%2Fchat', `?s=${'a'.repeat(41)}`]) {
+    assert.deepEqual(urlChat(search), { kind: 'invalid' }, search)
+  }
 })

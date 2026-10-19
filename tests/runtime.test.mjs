@@ -7,17 +7,17 @@ import test from 'node:test'
 // own integration test; the agent's fetch has tests/libfx-agent.test.mjs.
 const journalNames = [
   'answerActiveQuestion', 'appendEvent', 'bindLibfxSession', 'chatOfLibfxSession', 'claimSessionCleanup',
-  'clearActiveQuestion', 'clearActiveTurn', 'currentSeq', 'emitLive', 'finishSessionCleanup', 'getActiveQuestion',
+  'clearActiveQuestion', 'currentSeq', 'emitLive', 'finishSessionCleanup', 'finishTurnWork', 'getActiveQuestion',
   'getActiveTurn', 'nextQuestionId', 'projectEvents', 'projectedCursor', 'publishDesignArtifact', 'readDesignArtifact',
-  'readDesignMd', 'readEvents', 'readSession', 'readSessionView', 'releaseSessionCleanup', 'renewSessionCleanup',
-  'setActiveQuestion', 'setActiveTurn', 'submitPrompt', 'takeAnswer', 'updateSession',
+  'readDesignMd', 'readEvents', 'readSession', 'readSessionView', 'readTurnWork', 'releaseSessionCleanup', 'renewSessionCleanup',
+  'setActiveQuestion', 'submitPrompt', 'takeAnswer', 'updateSession',
 ]
 const dataUrl = (source) => `data:text/javascript,${encodeURIComponent(source)}`
 const forward = (root, names) => names.map((name) =>
   `export const ${name} = (...args) => globalThis.__fx0Runtime.${root}.${name}(...args)`).join('\n')
 const journalUrl = dataUrl(`export class SessionCleanupError extends Error {}\nexport const QUESTION_WAIT_MS = 600000\n` + forward('journal', journalNames))
 const libfxUrl = dataUrl(forward('libfx', ['createFxAgent', 'createFxEngine']))
-const credentialUrl = dataUrl(forward('credentialStore', ['saveTurnCredential', 'saveTrialCredential', 'readTurnCredential', 'readExecutionCredential', 'dropLoginCredentials', 'dropChatCredential']))
+const credentialUrl = dataUrl(forward('credentialStore', ['saveTurnCredential', 'saveTrialCredential', 'renewLatestCredential', 'readTurnCredential', 'readExecutionFunding', 'dropLoginCredentials', 'dropChatCredential']))
 const historyUrl = dataUrl(forward('history', ['recordTurn', 'recordGeneration']))
 const gatewayUrl = dataUrl(`import { AuthError } from ${JSON.stringify(new URL('../lib/accounts.ts', import.meta.url).href)}
 export const RATE_LIMIT_ATTEMPTS = 3
@@ -77,7 +77,12 @@ function fixture(t, stored = { preferredModel: null, preferredEffort: null, pref
   const logs = new Map()
   const credentials = new Map()
   const executionCredentials = new Map()
+  // `${chatId}:${turnId}` -> who funded the turn; sign-out keeps these.
+  const fundings = new Map()
   let active = null
+  // Each finished turn's history work, and the design it left, until written.
+  const work = new Map()
+  const designs = new Map()
   let deleting = false
   let question = null
   let answer = null
@@ -86,7 +91,7 @@ function fixture(t, stored = { preferredModel: null, preferredEffort: null, pref
   let messageSeq = 0
   const state = {
     stored,
-    calls, events, logs, credentials, executionCredentials,
+    calls, events, logs, credentials, executionCredentials, fundings,
     agentOptions: null,
     engineOptions: [],
     sent: [],
@@ -120,8 +125,10 @@ function fixture(t, stored = { preferredModel: null, preferredEffort: null, pref
       appendEvent: async (_id, entry) => { const item = { ...entry, seq: events.length + 1 }; events.push(item); return item },
       publishDesignArtifact: async (...args) => { calls.push(['publish', ...args]); return { ok: true, revision: 2, changed: true } },
       getActiveTurn: async () => active,
-      setActiveTurn: async (_id, turn) => { active = turn },
-      clearActiveTurn: async (_id, id) => { if (active?.id === id) active = null },
+      readTurnWork: async () => [...work.values()].map((item) => ({ ...item, ...(designs.has(item.turnId) ? { design: designs.get(item.turnId) } : {}) }))
+        .concat([...designs].filter(([turnId]) => !work.has(turnId)).map(([turnId, design]) => ({ turnId, design })))
+        .sort((a, b) => a.turnId - b.turnId),
+      finishTurnWork: async (_id, turnId) => { work.delete(turnId); designs.delete(turnId) },
       nextQuestionId: async () => 7,
       setActiveQuestion: async (_id, value) => { question = value },
       getActiveQuestion: async () => question,
@@ -139,11 +146,26 @@ function fixture(t, stored = { preferredModel: null, preferredEffort: null, pref
       },
       clearActiveQuestion: async (_id, qid) => { if (question?.qid !== qid) return false; question = null; return true },
       projectedCursor: async () => projected,
-      // The same cursor check as the Lua script.
-      projectEvents: async (_id, from, to, entries) => {
+      // The same cursor check and turn bookkeeping as the Lua script; its own
+      // behavior against real Redis is tests/turn-work.integration.mjs.
+      projectEvents: async (_id, from, to, entries, starts = {}) => {
         if (deleting || projected !== from) return null
         projected = to
-        return entries.map((entry) => { const item = { ...entry, seq: events.length + 1 }; events.push(item); return item })
+        return entries.map((entry) => {
+          const item = { ...entry, seq: events.length + 1 }
+          events.push(item)
+          if (item.type === 'turn_start' && starts[item.id]) active = { ...starts[item.id], startSeq: item.seq }
+          else if ((item.type === 'done' || item.type === 'error') && item.id) {
+            const turn = active?.id === item.id ? active : undefined
+            if (turn) active = null
+            work.set(item.id, { turnId: item.id, type: item.type, stopReason: item.stopReason, usage: item.usage, at: item.at, ...(turn ? { turn } : {}) })
+            if (state.stored?.artifactTurn === item.id) {
+              designs.set(item.id, { revision: artifactRevision, html: '<!doctype html><html><head></head><body>old</body></html>' })
+              state.stored = { ...state.stored, artifactTurn: null }
+            }
+          }
+          return item
+        })
       },
       readEvents: async (_id, after = 0) => events.filter((item) => item.seq > after),
       updateSession: async (_id, fields) => {
@@ -200,13 +222,32 @@ function fixture(t, stored = { preferredModel: null, preferredEffort: null, pref
       },
     },
     credentialStore: {
-      saveTurnCredential: async (chatId, session, turnId) => { credentials.set(chatId, session); if (turnId) executionCredentials.set(`${chatId}:${turnId}`, session) },
-      saveTrialCredential: async (chatId, credential, turnId) => { executionCredentials.set(`${chatId}:${turnId}`, credential) },
+      saveTurnCredential: async (chatId, session, turnId) => {
+        credentials.set(chatId, session)
+        executionCredentials.set(`${chatId}:${turnId}`, session)
+        fundings.set(`${chatId}:${turnId}`, { kind: 'user', userId: session.userId, loginId: session.loginId, teamId: session.teamId })
+      },
+      saveTrialCredential: async (chatId, credential, turnId) => {
+        executionCredentials.set(`${chatId}:${turnId}`, credential)
+        fundings.set(`${chatId}:${turnId}`, { kind: 'trial', userId: credential.userId, loginId: credential.loginId })
+      },
+      renewLatestCredential: async (chatId, session) => { credentials.set(chatId, session) },
       readTurnCredential: async (chatId) => credentials.get(chatId) ?? null,
-      readExecutionCredential: async (chatId, turnId) => executionCredentials.get(`${chatId}:${turnId}`) ?? credentials.get(chatId) ?? null,
+      readExecutionFunding: async (chatId, turnId) => {
+        const credential = executionCredentials.get(`${chatId}:${turnId}`) ?? credentials.get(chatId) ?? null
+        return credential ? { ok: true, credential } : { ok: false, refused: 'unusable' }
+      },
       dropLoginCredentials: async (loginId) => {
-        const dropped = [...credentials].filter(([, value]) => value.loginId === loginId).map(([chatId]) => chatId)
-        for (const chatId of dropped) credentials.delete(chatId)
+        const chatOf = (key) => key.slice(0, key.lastIndexOf(':'))
+        const dropped = []
+        for (const chatId of new Set([...credentials.keys(), ...[...fundings.keys()].map(chatOf)])) {
+          const latestWasLogin = credentials.get(chatId)?.loginId === loginId
+          const turns = [...fundings].filter(([key, funding]) => chatOf(key) === chatId && funding.loginId === loginId)
+          if (!latestWasLogin && !turns.length) continue
+          if (latestWasLogin) credentials.delete(chatId)
+          const deleted = turns.filter(([key]) => executionCredentials.delete(key)).length
+          dropped.push({ chatId, turns: deleted, latest: latestWasLogin ? 'deleted' : 'not-this-login' })
+        }
         return dropped
       },
       dropChatCredential: async (chatId) => { credentials.delete(chatId); calls.push(['dropCredential', chatId]) },
@@ -274,6 +315,21 @@ test('the route\'s explicit sender survives another request rebinding the host b
   await runtime.submitPrompt(host, 'Ada', 'First', undefined, undefined, undefined, undefined, undefined, sender)
   assert.equal(f.credentials.get('before-submit-race').accessToken, sender.accessToken)
   assert.equal(f.credentials.get('before-submit-race').loginId, sender.loginId)
+})
+
+test('every paid message is pinned to the turn it starts, in a paid-only chat too', async (t) => {
+  const f = fixture(t)
+  const host = boundHost('paid-chat', credential('user-a', 'login-laptop', 'laptop-token'))
+  await runtime.submitPrompt(host, 'Ada', 'Long design')
+  // Another team's image prompt queues behind the running turn.
+  const phone = { ...credential('user-a', 'login-phone', 'phone-token'), teamId: 'team_b' }
+  await runtime.submitPrompt(host, 'Ada', 'Use this', undefined, [{ type: 'image', mimeType: 'image/png', data: 'cG5n' }], undefined, undefined, undefined, phone)
+  assert.notEqual(f.stored?.trialChat, true)
+  assert.deepEqual([...f.fundings], [
+    ['paid-chat:1', { kind: 'user', userId: 'user-a', loginId: 'login-laptop', teamId: 'team_a' }],
+    ['paid-chat:2', { kind: 'user', userId: 'user-a', loginId: 'login-phone', teamId: 'team_b' }],
+  ])
+  assert.equal(f.executionCredentials.get('paid-chat:1').accessToken, 'laptop-token')
 })
 
 // Keep these tests sequential: each fixture owns the fake external boundaries.
@@ -410,16 +466,22 @@ test('ask_user_question waits for the open question\'s answer and rejects answer
   assert.equal(f.events.at(-1).cancelled, true)
 })
 
-test('cancel stops the running libfx turn, and does nothing when the chat is idle', async (t) => {
+test('cancel always reaches libfx, even when fx0 has no running turn on record', async (t) => {
   const f = fixture(t, { libfxSessionId: 'wrun_9' })
   const host = boundHost('cancel-chat')
-  assert.equal(await runtime.cancelCurrent(host), false)
+  // No marker: its turn_start may not be projected yet, or the turn outlived the
+  // marker's TTL. libfx stops whatever turn is open, and ignores it if none is.
+  assert.equal(await runtime.cancelCurrent(host), true)
   f.setActive({ id: 3 })
   assert.equal(await runtime.cancelCurrent(host), true)
-  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [['cancel', 'wrun_9']])
+  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [['cancel', 'wrun_9'], ['cancel', 'wrun_9']])
+  // A chat no prompt has reached libfx for has nothing to cancel.
+  f.stored = { ...f.stored, libfxSessionId: null }
+  assert.equal(await runtime.cancelCurrent(host), false)
+  assert.equal(f.calls.filter((call) => call[0] === 'cancel').length, 2)
 })
 
-test('sign-out drops only this login\'s chat credentials and cancels those chats\' running turns', async (t) => {
+test('sign-out drops only this login\'s chat credentials and cancels no turn', async (t) => {
   const f = fixture(t, { libfxSessionId: 'wrun_5' })
   f.credentials.set('laptop-chat', credential('user-a', 'login-laptop'))
   f.credentials.set('phone-chat', credential('user-a', 'login-phone'))
@@ -430,7 +492,31 @@ test('sign-out drops only this login\'s chat credentials and cancels those chats
   assert.equal(laptop.gatewaySession, null)
   assert.equal(phone.gatewaySession?.loginId, 'login-phone')
   assert.deepEqual([...f.credentials.keys()], ['phone-chat'])
-  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [['cancel', 'wrun_5']])
+  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [], 'its turn stops at its next model request instead')
+})
+
+test('in a trial-marked chat, each login\'s sign-out drops only its own turns\' credentials and cancels nothing', async (t) => {
+  const f = fixture(t, { libfxSessionId: 'wrun_6' })
+  const host = boundHost('shared-chat', credential('user-a', 'login-laptop', 'laptop-token'))
+  const free = { kind: 'trial', userId: 'user-a', loginId: 'login-laptop', expiresAt: Date.now() + 86400000 }
+  await runtime.submitPrompt(host, 'Ada', 'Free design', 'free-1', undefined, undefined, undefined, free)
+  await runtime.submitPrompt(host, 'Ada', 'Paid follow-up', 'paid-2', undefined, undefined, undefined, undefined, credential('user-a', 'login-phone', 'phone-token'))
+  assert.equal(f.stored.trialChat, true)
+  f.setActive({ id: 2 }) // the phone's paid turn is running
+
+  await runtime.cancelUserRuntime('user-a', 'login-laptop')
+  assert.deepEqual([...f.executionCredentials.keys()], ['shared-chat:2'], 'the phone\'s turn keeps its credential')
+  assert.equal(f.credentials.get('shared-chat')?.loginId, 'login-phone')
+  await runtime.cancelUserRuntime('user-a', 'login-phone')
+  assert.deepEqual([...f.executionCredentials.keys()], [])
+  assert.equal(f.credentials.has('shared-chat'), false)
+
+  assert.deepEqual(f.calls.filter((call) => call[0] === 'cancel'), [])
+  const signOuts = console.info.mock.calls.map((call) => JSON.parse(call.arguments[0])).filter((line) => line.event === 'signout:credentials')
+  assert.deepEqual(signOuts.map(({ session, turns, latest }) => [session, turns, latest]), [
+    ['shared-chat', 1, 'not-this-login'],
+    ['shared-chat', 1, 'deleted'],
+  ])
 })
 
 test('deletion refuses a chat with a running turn and otherwise drops its records, mapping and credential', async (t) => {
@@ -483,13 +569,13 @@ test('a settings change while a turn runs is accepted and says it applies from t
 test('a turn\'s history and subagents keep the settings it started with after a mid-turn change', async (t) => {
   const f = fixture(t, { libfxSessionId: 'wrun_paid', preferredModel: 'anthropic/start-model', preferredEffort: 'high', preferredFast: false })
   const host = boundHost('paid-history')
-  let started = null
-  const setActiveTurn = f.journal.setActiveTurn
-  f.journal.setActiveTurn = async (id, turn) => { started = turn; return setActiveTurn(id, turn) }
   const log = f.logOf('wrun_paid')
   const following = projector.project(runtime.agent(), host, 'wrun_paid', { idleMs: 60 })
   log.push({ type: 'turn_start', messageId: 'm1', sessionId: 'wrun_paid', input: '[Ada] Go' })
-  await until(() => started, 'turn start')
+  // The turn is marked running in the same commit that projects its turn_start.
+  await until(() => f.events.some((item) => item.type === 'turn_start'), 'turn start')
+  const started = await f.journal.getActiveTurn('paid-history')
+  assert.equal(started.startSeq, f.events.find((item) => item.type === 'turn_start').seq)
   assert.deepEqual(started.settings, { model: 'anthropic/start-model', effort: 'high', fast: false })
   assert.deepEqual(await runtime.setSessionGeneration(host, { model: 'anthropic/next-model', effort: 'low' }), { ok: true })
 
@@ -536,6 +622,39 @@ test('the projector copies a turn once however many follow it, then records its 
   assert.equal(history[0][1].response, 'Making it teal.')
   assert.equal(history[0][1].billingTeamId, 'team_a')
   assert.deepEqual(f.calls.filter((call) => call[0] === 'generation').map((call) => call.slice(1, 4)), [['project-chat', 3, 4]])
+})
+
+test('a turn\'s history waits when the database fails, and a later follower writes it once', async (t) => {
+  const f = fixture(t, { libfxSessionId: 'wrun_retry', preferredModel: null, preferredEffort: null, preferredFast: null })
+  const host = boundHost('retry-chat')
+  f.credentials.set('retry-chat', credential())
+  let failing = true
+  const recordTurn = f.history.recordTurn
+  f.history.recordTurn = async (turn) => { if (failing) throw new Error('database unavailable'); return recordTurn(turn) }
+  const log = f.logOf('wrun_retry')
+  const following = projector.project(runtime.agent(), host, 'wrun_retry', { idleMs: 60 })
+  log.push({ type: 'turn_start', messageId: 'm2', sessionId: 'wrun_retry', input: '[Ada] Keep this' })
+  log.push({ type: 'text_delta', messageId: 'm2', delta: 'Kept.' })
+  f.setArtifactRevision(5)
+  f.stored = { ...f.stored, artifactTurn: 2 }
+  log.push({ type: 'turn_end', messageId: 'm2', stopReason: 'end_turn' })
+  await following
+  // The transcript and the turn's end committed; its history did not, so its work stays.
+  assert.equal(await f.journal.getActiveTurn('retry-chat'), null)
+  const waiting = await f.journal.readTurnWork('retry-chat')
+  assert.deepEqual(waiting.map((item) => [item.turnId, item.turn?.prompt, item.design?.revision]), [[2, 'Keep this', 5]])
+  assert.deepEqual(f.calls.filter((call) => call[0] === 'history'), [])
+
+  failing = false
+  await projector.finishTurns(host)
+  await projector.finishTurns(host)
+  const history = f.calls.filter((call) => call[0] === 'history')
+  assert.equal(history.length, 1)
+  assert.equal(history[0][1].prompt, 'Keep this')
+  assert.equal(history[0][1].response, 'Kept.')
+  // The design is written again with its retry; the insert ignores a repeat.
+  assert.ok(f.calls.filter((call) => call[0] === 'generation').every((call) => call[1] === 'retry-chat' && call[2] === 5 && call[3] === 2))
+  assert.deepEqual(await f.journal.readTurnWork('retry-chat'), [])
 })
 
 test('sponsored history keeps the actual free model even after later settings change', async (t) => {
