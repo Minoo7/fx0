@@ -470,7 +470,14 @@ test('the browser keeps a preview only when its URL names the revision that is l
   globalThis.securityTest.liveRevision = 2
   const current = await frame('&v=2')
   assert.equal(current.status, 200)
-  assert.equal(current.headers.get('cache-control'), 'private, max-age=31536000, immutable')
+  assert.equal(current.headers.get('cache-control'), 'private, no-cache')
+  const etag = current.headers.get('etag')
+  assert.ok(etag, 'the live revision carries a validator')
+  // A kept copy revalidates through the session check and costs an empty 304.
+  const revalidate = request('artifact-frame', 'GET', own, undefined, 'null')
+  const unchanged = await routes['artifact-frame'].GET(new Request(`${revalidate.url}&v=2`, { headers: { ...Object.fromEntries(revalidate.headers), 'if-none-match': etag } }))
+  assert.equal(unchanged.status, 304)
+  assert.equal(await unchanged.text(), '')
   // The live design moved on, or the page names none: the bytes may not be v, so nothing is kept.
   for (const query of ['&v=1', '&v=3', '', '&v=abc']) {
     assert.equal((await frame(query)).headers.get('cache-control'), 'private, no-store', query || 'no v')

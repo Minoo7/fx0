@@ -32,8 +32,9 @@ export async function POST(request: NextRequest) {
   ]))
   const loginId = request.cookies.get(SESSION_COOKIE_NAME)?.value
   const cleared = isLoginId(loginId) ? await sealSessionCookie(null, loginId) : null
-  // Previews are kept in the browser's cache by revision; none outlive the sign-out.
-  const response = NextResponse.json({ success: true }, { headers: { 'Cache-Control': 'no-store', 'Clear-Site-Data': '"cache"' } })
+  // No Clear-Site-Data: Chrome scans its whole disk cache for it and stalls the page
+  // for seconds. Cached previews revalidate against the session instead.
+  const response = NextResponse.json({ success: true }, { headers: { 'Cache-Control': 'no-store' } })
   response.cookies.set(FLOW_COOKIE_NAME, '', { ...FLOW_COOKIE_OPTIONS, maxAge: 0 })
   if (cleared) response.headers.append('set-cookie', cleared.setCookie)
   response.headers.append('set-cookie', selectorCookie(null).setCookie)
