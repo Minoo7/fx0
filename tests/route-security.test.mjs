@@ -76,6 +76,9 @@ const mocks = {
     export async function recordTurn() { return true; }
     export async function recordGeneration() { return true; }
   `,
+  // The session mock ignores cookies, so revoked grants are covered with the real
+  // readers in tests/auth.test.mjs.
+  'lib/turn-credential.ts': 'export async function loginRevoked() { return false }',
   'lib/journal.ts': `
     function record(name, id) { const s = globalThis.securityTest; s.trace.push(name); s.redisReads.push(id); return s; }
     export async function sessionExists(id) { return record('exists', id).existing.has(id); }

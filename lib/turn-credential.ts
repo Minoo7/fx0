@@ -33,7 +33,9 @@ const turnCredentialKey = (chatId: string, turnId: number) => `${credentialKey(c
 const loginKey = (loginId: string) => prefixed(`login-chats:${loginId}`)
 const revokedLoginKey = (loginId: string) => prefixed(`revoked-login:${loginId}`)
 
-async function loginRevoked(loginId: string): Promise<boolean> {
+// Whether sign-out has revoked this login. Session readers check it as well as
+// credential reads and writes, so a copied grant is no session either.
+export async function loginRevoked(loginId: string): Promise<boolean> {
   return await redis().get(revokedLoginKey(loginId)) !== null
 }
 

@@ -1,7 +1,7 @@
 import { Suspense } from 'react'
 import { redirect } from 'next/navigation'
 import { connection } from 'next/server.js'
-import { getSession, isAuthenticatedSession } from '@/lib/secure-session'
+import { requireUserSession } from '@/lib/auth'
 
 export const metadata = { title: 'Sign in · fx0' }
 
@@ -25,9 +25,10 @@ function SignInLink({ href }: { href: string }) {
 async function SignIn({ searchParams }: { searchParams: SearchParams }) {
   // Unsealing the session reads the clock, which must happen at request time.
   await connection()
-  const [session, params] = await Promise.all([getSession(), searchParams])
+  // A signed-out login's grant, or any failure to check it, shows sign-in.
+  const [session, params] = await Promise.all([requireUserSession().catch(() => null), searchParams])
   // An expired grant is not a usable session: sending it to / would loop back here.
-  if (isAuthenticatedSession(session) && session.expiresAt > Date.now() && !params.error) redirect('/')
+  if (session && session.expiresAt > Date.now() && !params.error) redirect('/')
   const message = typeof params.error === 'string'
     ? ERRORS[params.error] ?? 'Sign in could not be completed. Please try again.'
     : params.error ? 'Sign in could not be completed. Please try again.' : null

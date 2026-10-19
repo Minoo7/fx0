@@ -12,6 +12,10 @@ globalThis.__authCallbackAccountWrites = writes
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === '@/lib/turn-credential' && context.parentURL?.endsWith('/api/auth/signout/route.ts')) return { url: 'data:text/javascript,export async function revokeLoginCredentials() {}', shortCircuit: true }
+    // No login is signed out here; tests/auth.test.mjs covers revoked grants.
+    if (specifier === './turn-credential.ts' && /\/lib\/(auth|request-session)\.ts$/.test(context.parentURL ?? '')) {
+      return { url: 'data:text/javascript,export async function loginRevoked() { return false }', shortCircuit: true }
+    }
     if (specifier === '@/lib/accounts' && context.parentURL.endsWith('/api/auth/callback/route.ts')) {
       return { url: 'auth-test:account-boundary', shortCircuit: true }
     }
