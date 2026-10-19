@@ -43,7 +43,21 @@ test('a design may only ask to open a whole https address, shown in full before 
   assert.ok(spaced.length <= MAX_DESIGN_LINK_LENGTH && new URL(spaced).href.length > MAX_DESIGN_LINK_LENGTH)
   assert.equal(designLinkUrl(spaced), null)
 })
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+
+test('the libfx wake route stays private, so only Vercel Queues can deliver to it', () => {
+  // A function with a queue trigger has no public URL on Vercel. Its handler acts on
+  // the delivery it is handed: the bundled queue client runs libfx before the broker
+  // confirms the receipt. So the trigger is what keeps forged deliveries out.
+  const config = JSON.parse(readFileSync(new URL('../vercel.json', import.meta.url), 'utf8'))
+  const triggers = config.functions?.['app/api/libfx/route.ts']?.experimentalTriggers ?? []
+  assert.deepEqual(triggers.map(({ type, topic }) => ({ type, topic })), [{ type: 'queue/v2beta', topic: '__libfx_wkf_workflow_session' }])
+  // No other route serves the wake handler, since one without the trigger would be public.
+  const routes = readdirSync(new URL('../app', import.meta.url), { recursive: true })
+    .filter((path) => /(^|\/)route\.tsx?$/.test(path))
+  const serving = routes.filter((path) => readFileSync(new URL(`../app/${path}`, import.meta.url), 'utf8').includes('wakeHandler('))
+  assert.deepEqual(serving, ['api/libfx/route.ts'])
+})
 import { DESIGN_MD_CATALOG, DESIGN_MD_MAX_BYTES, parseDesignMdRequest } from '../lib/design-md.ts'
 
 function toolHost() {
