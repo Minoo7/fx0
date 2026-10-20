@@ -288,6 +288,9 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   // per chat, so switching to another chat and back doesn't restart it.
   const [activityStarts, setActivityStarts] = useState<ActivityStarts>(() => new Map())
   const [awaiting, setAwaiting] = useState(false)
+  // The server accepted the awaited prompt: it is stored and its turn is
+  // starting, so the activity line says "thinking" before turn_start arrives.
+  const [sendAccepted, setSendAccepted] = useState(false)
   const [authStatus, setAuthStatus] = useState<401 | 403 | null>(null)
   const [signOutStatus, setSignOutStatus] = useState<'pending' | 'failed' | null>(null)
   const signOutPending = useRef(false)
@@ -1240,6 +1243,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     const designPick = targetSession === 'draft' ? composerRef.current?.getDesignMd() ?? null : null
     // The bubble shows at once, before a draft's chat is reserved on the server.
     setAwaiting(true)
+    setSendAccepted(false)
     setActivityStarts((starts) => startActivity(starts, targetSession, Date.now()))
     setInteractionNotice(null)
     setEntries((prev) => [
@@ -1385,6 +1389,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
         targetSession = created
       }
       promptAdmitted = true
+      if (activeSession.current === targetSession) setSendAccepted(true)
       setSessions((prev) => upsertSession(
         withCurrentSession(createdSummary ? mergeSessions(prev, [createdSummary]) : prev, targetSession, acceptedAt, [acceptedUser], currentView.current),
         targetSession,
@@ -1657,7 +1662,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
 
   const activityText =
     awaiting && activeTurnId == null
-      ? 'sending'
+      ? sendAccepted ? 'thinking' : 'sending'
       : activeTurnId == null
         ? ''
         : entries.at(-1)?.type === 'text'
