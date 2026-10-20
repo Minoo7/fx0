@@ -41,7 +41,6 @@ import Sidebar from './sidebar'
 import SidebarGestures, { type SidebarGestureControls } from './sidebar-gestures'
 import { Button } from './ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
-import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import SourceLink from './source-link'
 import {
   DEFAULT_VIEW,
@@ -1810,7 +1809,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
           </div>
 
           <header className="shrink-0 border-b border-border bg-background">
-            <div className="flex h-12 items-center gap-1.5 px-4">
+            <div className="flex h-12 items-center gap-1 px-2 md:gap-1.5 md:px-4">
               <Button
                 ref={menuButtonRef}
                 variant="ghost"
@@ -1949,31 +1948,23 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
                 />
               ))}
 
-              {/* Only a phone switches between the conversation and the preview. */}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    ref={previewButtonRef}
-                    variant={previewOpen ? 'secondary' : 'ghost'}
-                    size="icon-sm"
-                    className="lg:hidden"
-                    aria-label={previewOpen ? 'close preview' : 'open preview'}
-                    aria-expanded={previewOpen}
-                    aria-controls="preview-pane"
-                    {...fastClick(() => {
-                      setInteractionNotice(null)
-                      if (previewOpen) closePreview()
-                      else setPreviewVisibility(true)
-                    })}
-                  >
-                    <svg viewBox="0 0 16 16" className="size-4" aria-hidden="true">
-                      <rect x="2" y="3.5" width="12" height="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                      <rect x="9.25" y="3.5" width="4.75" height="9" fill="currentColor" />
-                    </svg>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{previewOpen ? 'close preview' : 'open preview'}</TooltipContent>
-              </Tooltip>
+              {/* Only a phone switches between the conversation and the preview;
+                  the label names the pane the tap goes to. */}
+              <Button
+                ref={previewButtonRef}
+                variant="ghost"
+                size="sm"
+                className="shrink-0 px-2 font-normal lg:hidden"
+                aria-expanded={previewOpen}
+                aria-controls="preview-pane"
+                {...fastClick(() => {
+                  setInteractionNotice(null)
+                  if (previewOpen) closePreview()
+                  else setPreviewVisibility(true)
+                })}
+              >
+                {previewOpen ? 'chat' : 'preview'}
+              </Button>
             </div>
             {visibleErrorNotice && (
               <div role="alert" className="bg-error/10 px-4 py-2 text-sm text-error">
