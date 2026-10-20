@@ -10,6 +10,7 @@ import { checkBotId } from 'botid/server'
 import { trialEnabled, trialIpHash, trialStore, type TrialCredential, type TrialReservation } from '../../../lib/trial'
 import { TRIAL_MODEL, usesFreePrompts } from '../../../lib/trial-policy'
 import { DEFAULT_MODEL, log } from '../../../lib/session'
+import { PROMPT_TEXT_LIMIT_ERROR, PROMPT_TEXT_MAX_BYTES, promptTextBytes } from '../../../lib/prompt-limits'
 
 export const maxDuration = 800
 
@@ -49,6 +50,8 @@ export const POST = withPromptRoute(async (request, context) => {
       )
     : undefined
   if (!text && !images?.length) return Response.json({ error: 'empty prompt' }, { status: 400 })
+  // Rejected whole, never cut: the composer keeps the draft and shows this error.
+  if (promptTextBytes(text) > PROMPT_TEXT_MAX_BYTES) return Response.json({ error: PROMPT_TEXT_LIMIT_ERROR }, { status: 413 })
   if ((images?.length ?? 0) > 8) return Response.json({ error: 'prompt cannot contain more than 8 images' }, { status: 413 })
   let imageBytes = 0
   for (const [index, image] of (images ?? []).entries()) {
@@ -124,7 +127,7 @@ export const POST = withPromptRoute(async (request, context) => {
     submitted = await submitPrompt(
       activated.host,
       author,
-      text.slice(0, 4000),
+      text,
       clientId,
       images?.length ? images : undefined,
       initial,

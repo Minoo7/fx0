@@ -975,7 +975,7 @@ test('how it works explains fx0 and links to forking its repo', (t) => {
 test('oversized OAuth draft blocks navigation visibly rather than losing text or images', (t) => {
   const ui = browser(t)
   const app = mount(t, ui)
-  const oversized = { ...draft, text: 'a'.repeat(64 * 1024 + 1) }
+  const oversized = { ...draft, text: 'a'.repeat(256 * 1024 + 1) }
   app.handle().restoreDraft(oversized)
   app.render()
   app.send()

@@ -4,7 +4,7 @@ import test from 'node:test'
 
 // guest-draft.ts imports lib/design-md without an extension, as Next resolves it.
 registerHooks({ resolve(specifier, context, next) {
-  if (specifier === '../lib/design-md') return next('../lib/design-md.ts', context)
+  if (specifier === '../lib/design-md' || specifier === '../lib/prompt-limits') return next(`${specifier}.ts`, context)
   return next(specifier, context)
 } })
 const { GUEST_DRAFT_KEY, GUEST_DRAFT_TTL, GUEST_DRAFT_MAX_BYTES, saveGuestDraft, takeGuestDraft, parseGuestDraft, clearGuestDraft } = await import('../components/guest-draft.ts')
@@ -29,7 +29,7 @@ test('OAuth draft contains only unsent text and image bytes, restores once and e
 })
 
 test('invalid shapes, credential fields, unsafe previews, timestamps and oversized bytes are rejected', () => {
-  for (const value of [null, [], {}, { ...envelope, version: 1 }, { ...envelope, submit: 'yes' }, { ...envelope, designMd: { id: 'not-in-catalog', name: 'X' } }, { ...envelope, designMd: { id: 'vercel', name: 'Not Vercel' } }, { ...envelope, designMd: { name: 'design.md', text: '' } }, { ...envelope, designMd: { name: 'design.md', text: 'x'.repeat(100 * 1024 + 1) } }, { ...envelope, designMd: { name: 'design.md', text: 'ok', source: 'upload' } }, { ...envelope, token: 'secret' }, { ...envelope, expiresAt: 100 + GUEST_DRAFT_TTL + 1 }, { ...envelope, text: 42 }, { ...envelope, text: '😀'.repeat(20_000) }, { ...envelope, images: Array(9).fill(envelope.images[0]) }, { ...envelope, images: [{ ...envelope.images[0], preview: 'https://private.example' }] }, { ...envelope, images: [{ data: 'javascript:alert(1)', mimeType: 'image/png' }] }, { ...envelope, images: [{ data: 'aGVsbG8=', mimeType: 'text/html' }] }, { ...envelope, images: [{ data: 'A'.repeat(3 * 1024 * 1024 + 4), mimeType: 'image/png' }] }]) {
+  for (const value of [null, [], {}, { ...envelope, version: 1 }, { ...envelope, submit: 'yes' }, { ...envelope, designMd: { id: 'not-in-catalog', name: 'X' } }, { ...envelope, designMd: { id: 'vercel', name: 'Not Vercel' } }, { ...envelope, designMd: { name: 'design.md', text: '' } }, { ...envelope, designMd: { name: 'design.md', text: 'x'.repeat(100 * 1024 + 1) } }, { ...envelope, designMd: { name: 'design.md', text: 'ok', source: 'upload' } }, { ...envelope, token: 'secret' }, { ...envelope, expiresAt: 100 + GUEST_DRAFT_TTL + 1 }, { ...envelope, text: 42 }, { ...envelope, text: '😀'.repeat(64 * 1024 + 1) }, { ...envelope, images: Array(9).fill(envelope.images[0]) }, { ...envelope, images: [{ ...envelope.images[0], preview: 'https://private.example' }] }, { ...envelope, images: [{ data: 'javascript:alert(1)', mimeType: 'image/png' }] }, { ...envelope, images: [{ data: 'aGVsbG8=', mimeType: 'text/html' }] }, { ...envelope, images: [{ data: 'A'.repeat(3 * 1024 * 1024 + 4), mimeType: 'image/png' }] }]) {
     assert.equal(parseGuestDraft(JSON.stringify(value), 100), null)
   }
   assert.equal(parseGuestDraft('{', 100), null)
