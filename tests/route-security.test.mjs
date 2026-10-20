@@ -109,7 +109,7 @@ const mocks = {
     }
     export async function warmChat(host) { effect('warm', host); }
     export function log() {}
-    export async function submitPrompt(host, author, ...args) { effect('prompt', host); globalThis.securityTest.author = author; globalThis.securityTest.funding = args[5]; return { id: 1, seq: globalThis.securityTest.submittedSeq ?? 1, trialChat: !!args[5] || !!globalThis.securityTest.generationOptions?.trialChat }; }
+    export async function submitPrompt(host, author, ...args) { effect('prompt', host); globalThis.securityTest.author = author; globalThis.securityTest.text = args[0]; globalThis.securityTest.funding = args[5]; return { id: 1, seq: globalThis.securityTest.submittedSeq ?? 1, trialChat: !!args[5] || !!globalThis.securityTest.generationOptions?.trialChat }; }
     export async function followChat(host) { effect('wake', host); }
     export async function renewTurnCredential(host) { effect('renew', host); }
     export async function cancelCurrent(host) { effect('cancel', host); return true; }
@@ -308,6 +308,21 @@ test('rejected guest input creates no ownership row or runtime, and a failed res
   assert.equal((await routes.prompt.POST(request('prompt', 'POST', 'new', { text: 'Hi' }))).status, 503)
   assert.equal(state.trialUsed, 0)
   assert.equal(state.trace.includes('host'), false)
+})
+
+test('long prompt text reaches the agent whole, and text past the limit is refused before any work', async () => {
+  let state = reset()
+  const long = 'x'.repeat(256 * 1024)
+  const response = await routes.prompt.POST(request('prompt', 'POST', own, { text: long }))
+  assert.equal(response.status, 200)
+  assert.equal(state.text, long)
+  await response.text()
+  state = reset()
+  const refused = await routes.prompt.POST(request('prompt', 'POST', own, { text: 'é'.repeat(128 * 1024 + 1) }))
+  assert.equal(refused.status, 413)
+  assert.match((await refused.json()).error, /256 KB/)
+  assert.equal(state.trace.includes('prompt'), false)
+  assert.equal(state.trace.includes('reserve'), false)
 })
 
 test('BotID failure does not gate paid-only models or paid continuation after the allowance', async () => {

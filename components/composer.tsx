@@ -9,6 +9,7 @@ import { Button } from './ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import { checkDesignMdUpload, DESIGN_MD_CATALOG, DESIGN_MD_MAX_BYTES } from '../lib/design-md'
 import { fastClick } from '../lib/fast-click'
+import { PROMPT_TEXT_LIMIT_ERROR, PROMPT_TEXT_MAX_BYTES, promptTextBytes } from '../lib/prompt-limits'
 import { focusPrompt, registerPrompt } from '../lib/prompt-focus'
 import { Textarea } from './ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
@@ -636,6 +637,11 @@ export default function Composer({
     const exactCommand = commands.find((command) => command.name === commandToken)
     if (slashQuery != null && images.length === 0 && exactCommand) {
       selectCommand(exactCommand)
+      return
+    }
+    // The server rejects longer text, so it never leaves the composer.
+    if (promptTextBytes(text) > PROMPT_TEXT_MAX_BYTES) {
+      setAttachmentError(PROMPT_TEXT_LIMIT_ERROR)
       return
     }
     if (onSend(text, images) === false) return

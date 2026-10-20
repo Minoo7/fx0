@@ -1,4 +1,5 @@
 import { checkDesignMdUpload, DESIGN_MD_CATALOG, DESIGN_MD_MAX_BYTES } from '../lib/design-md'
+import { PROMPT_TEXT_MAX_BYTES } from '../lib/prompt-limits'
 import type { AttachedImage, DesignMdPick } from './composer'
 
 export interface GuestDraft {
@@ -11,9 +12,9 @@ export interface GuestDraft {
 
 export const GUEST_DRAFT_KEY = 'fx0-guest-draft:v2'
 export const GUEST_DRAFT_TTL = 15 * 60 * 1000
-// Escaping can double the design.md's bytes in JSON.
-export const GUEST_DRAFT_MAX_BYTES = 3 * 1024 * 1024 + 128 * 1024 + 2 * DESIGN_MD_MAX_BYTES
-const TEXT_CAP = 64 * 1024
+// Escaping can double the text's and the design.md's bytes in JSON.
+export const GUEST_DRAFT_MAX_BYTES = 3 * 1024 * 1024 + 2 * PROMPT_TEXT_MAX_BYTES + 2 * DESIGN_MD_MAX_BYTES
+const TEXT_CAP = PROMPT_TEXT_MAX_BYTES
 const IMAGE_CAP = 3 * 1024 * 1024
 
 type DraftStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
