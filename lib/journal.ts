@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { Redis } from '@upstash/redis'
 // @ts-expect-error Node's strip-types integration test requires the source extension.
-import { validateDesignArtifactHtml } from './design-artifact.ts'
+import { assetReference, rewriteRemoteImages, validateDesignArtifactHtml } from './design-artifact.ts'
 // @ts-expect-error Node's strip-types integration test requires the source extension.
 import { type DesignMdInput } from './design-md.ts'
 // @ts-expect-error Node's strip-types integration test requires the source extension.
@@ -418,6 +418,8 @@ export async function readDesignMd(sessionId: string): Promise<string | null> {
 }
 
 const SESSION_PARTS = [
+  'asset-count',
+  'assets',
   'draft',
   'draft-chunks',
   'active',
@@ -573,6 +575,66 @@ redis.call('RPUSH', KEYS[5], cjson.encode(event))
 return cjson.encode({status = 'published', revision = revision, event = event})
 `
 
+// The images a chat's messages attached, by handle: what a design may name as
+// fx0-asset:<handle>. Deleting the chat removes this with the rest of its keys, which
+// makes the stored files unreachable at once (lib/design-assets.ts).
+export interface DesignAsset { mimeType: string; bytes: number }
+
+// Attached images are capped per chat and per user per UTC day. Both counts are
+// checked and taken together, atomically, before any file is stored, so concurrent
+// prompts cannot overshoot; a failed upload gives its share back.
+export const MAX_CHAT_ASSETS = 50
+export const MAX_DAILY_ASSETS = 100
+
+const RESERVE_ASSETS = `
+local count = tonumber(ARGV[1])
+local chat = tonumber(redis.call('GET', KEYS[1]) or '0')
+local daily = tonumber(redis.call('GET', KEYS[2]) or '0')
+if chat + count > tonumber(ARGV[2]) then return 'chat' end
+if daily + count > tonumber(ARGV[3]) then return 'daily' end
+redis.call('INCRBY', KEYS[1], count)
+redis.call('INCRBY', KEYS[2], count)
+redis.call('EXPIRE', KEYS[2], 172800)
+return 'ok'
+`
+
+const RELEASE_ASSETS = `
+local count = tonumber(ARGV[1])
+for _, name in ipairs(KEYS) do
+  if tonumber(redis.call('GET', name) or '0') >= count then redis.call('DECRBY', name, count) end
+end
+return 1
+`
+
+const dailyAssetKey = (userId: string, now: number) => prefixed(`user:${userId}:assets:${new Date(now).toISOString().slice(0, 10)}`)
+
+export async function reserveDesignAssets(sessionId: string, userId: string, count: number, now = Date.now()): Promise<'ok' | 'chat' | 'daily'> {
+  return redis().eval<string[], 'ok' | 'chat' | 'daily'>(RESERVE_ASSETS,
+    [key(sessionId, 'asset-count'), dailyAssetKey(userId, now)], [String(count), String(MAX_CHAT_ASSETS), String(MAX_DAILY_ASSETS)])
+}
+
+export async function releaseDesignAssets(sessionId: string, userId: string, count: number, now = Date.now()): Promise<void> {
+  await redis().eval<string[], number>(RELEASE_ASSETS, [key(sessionId, 'asset-count'), dailyAssetKey(userId, now)], [String(count)])
+}
+
+export async function recordDesignAssets(sessionId: string, assets: { handle: string; mimeType: string; bytes: number }[]): Promise<void> {
+  if (!assets.length) return
+  await redis().hset(key(sessionId, 'assets'), Object.fromEntries(assets.map(({ handle, mimeType, bytes }) => [handle, JSON.stringify({ mimeType, bytes })])))
+}
+
+export async function readDesignAssets(sessionId: string, handles?: string[]): Promise<Map<string, DesignAsset>> {
+  const found = new Map<string, DesignAsset>()
+  if (handles && !handles.length) return found
+  const values = handles
+    ? await redis().hmget<Record<string, unknown>>(key(sessionId, 'assets'), ...handles)
+    : await redis().hgetall<Record<string, unknown>>(key(sessionId, 'assets'))
+  for (const [handle, value] of Object.entries(values ?? {})) {
+    const asset = value == null ? null : parseJson<DesignAsset | null>(value)
+    if (asset && typeof asset.mimeType === 'string') found.set(handle, asset)
+  }
+  return found
+}
+
 export type PublishDesignArtifactResult =
   | { ok: true; revision: number; changed: boolean; event?: StreamItem }
   | { ok: false; reason: 'invalid' | 'fenced'; error: string }
@@ -584,6 +646,19 @@ export async function publishDesignArtifact(
 ): Promise<PublishDesignArtifactResult> {
   const validation = validateDesignArtifactHtml(html)
   if (!validation.ok) return { ok: false, reason: 'invalid', error: validation.error }
+  // An attached image is named by a handle the model was given; one this chat never
+  // received is refused here, so the model fixes it rather than showing a blank.
+  const handles = new Set<string>()
+  rewriteRemoteImages(validation.html, (reference) => {
+    const asset = assetReference(reference)
+    if (asset) handles.add(asset.slice('fx0-asset:'.length))
+    return null
+  })
+  if (handles.size) {
+    const known = await readDesignAssets(sessionId, [...handles])
+    const unknown = [...handles].find((handle) => !known.has(handle))
+    if (unknown) return { ok: false, reason: 'invalid', error: `fx0-asset:${unknown} is not an image attached to this chat` }
+  }
 
   const raw = await redis().eval<unknown[], unknown>(
     PUBLISH_DESIGN_ARTIFACT,

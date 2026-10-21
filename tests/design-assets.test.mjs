@@ -1,0 +1,162 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { registerHooks } from 'node:module'
+
+// design-assets keeps its manifest in the chat journal; here that is an in-memory map,
+// and the Blob store is a fake passed in, so no network or Redis is involved.
+const manifests = new Map()
+globalThis.__assetManifests = manifests
+registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier === './journal' && context.parentURL?.endsWith('/lib/design-assets.ts')) {
+      return { url: `data:text/javascript,${encodeURIComponent(`
+        const m = globalThis.__assetManifests
+        export async function recordDesignAssets(id, assets) { const map = m.get(id) ?? new Map(); for (const a of assets) map.set(a.handle, { mimeType: a.mimeType, bytes: a.bytes }); m.set(id, map) }
+        export async function readDesignAssets(id, handles) { const map = m.get(id) ?? new Map(); return new Map([...map].filter(([h]) => !handles || handles.includes(h))) }
+        export const MAX_CHAT_ASSETS = 50
+        export const MAX_DAILY_ASSETS = 100
+        export async function reserveDesignAssets() { return 'ok' }
+        export async function releaseDesignAssets() {}
+      `)}`, shortCircuit: true }
+    }
+    return next(specifier, context)
+  },
+})
+
+process.env.SESSION_SECRET ??= 'deterministic-design-assets-test-secret-32+'
+const { storeDesignAssets, readDesignAsset, deleteDesignAssets, DesignAssetLimitError } = await import('../lib/design-assets.ts')
+const { validateDesignArtifactHtml, rewriteRemoteImages, BLANK_IMAGE } = await import('../lib/design-artifact.ts')
+const { markRemoteImages } = await import('../lib/remote-image.ts')
+const { artifactImageSrc, verifyArtifactImage } = await import('../lib/artifact-image.ts')
+
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const CHAT = '11111111-1111-4111-8111-111111111111'
+const USER = 'user_a'
+const OPEN = { reserve: async () => 'ok', release: async () => {} }
+const HANDLE = 'AbCdEfGhIjKlMnOpQrStUvWx'
+const doc = (body, head = '') => `<!doctype html><html><head>${head}</head><body>${body}</body></html>`
+
+function fakeStore({ failOn = -1 } = {}) {
+  const files = new Map()
+  let puts = 0
+  return {
+    files,
+    async put(pathname, body, options) {
+      if (puts++ === failOn) throw new Error('blob down')
+      assert.equal(options.access, 'private')
+      assert.equal(options.addRandomSuffix, false)
+      files.set(pathname, { body: Buffer.from(body), contentType: options.contentType })
+      return { pathname }
+    },
+    async get(pathname) {
+      const file = files.get(pathname)
+      return file ? { statusCode: 200, stream: new Blob([file.body]).stream() } : null
+    },
+    async del(pathnames) { for (const pathname of [pathnames].flat()) files.delete(pathname) },
+    async list({ prefix, cursor }) {
+      const all = [...files.keys()].filter((pathname) => pathname.startsWith(prefix)).sort()
+      const start = cursor ? Number(cursor) : 0
+      const blobs = all.slice(start, start + 2).map((pathname) => ({ pathname }))
+      return { blobs, hasMore: start + 2 < all.length, cursor: String(start + 2) }
+    },
+  }
+}
+
+test('a message\'s images are stored privately and recorded for the chat, all or none', async () => {
+  manifests.clear()
+  const store = fakeStore()
+  const images = [{ type: 'image', data: PNG, mimeType: 'image/png' }, { type: 'image', data: PNG, mimeType: 'image/png' }]
+  const handles = await storeDesignAssets(CHAT, USER, images, store, OPEN)
+  assert.equal(handles.length, 2)
+  for (const handle of handles) {
+    assert.match(handle, /^[A-Za-z0-9_-]{24}$/)
+    assert.equal(store.files.get(`chats/${CHAT}/${handle}`).contentType, 'image/png')
+  }
+  assert.deepEqual([...manifests.get(CHAT).keys()].sort(), [...handles].sort())
+
+  manifests.clear()
+  const failing = fakeStore({ failOn: 1 })
+  await assert.rejects(storeDesignAssets(CHAT, USER, images, failing, OPEN), /Unable to store/)
+  assert.equal(failing.files.size, 0, 'the image that was stored is removed again')
+  assert.equal(manifests.size, 0, 'nothing is recorded')
+})
+
+test('the chat and daily caps are taken before anything is stored, and given back if storing fails', async () => {
+  manifests.clear()
+  const image = { type: 'image', data: PNG, mimeType: 'image/png' }
+  const calls = []
+  const quota = (answer) => ({
+    reserve: async (...args) => { calls.push(['reserve', ...args]); return answer },
+    release: async (...args) => { calls.push(['release', ...args]) },
+  })
+  for (const [limit, message] of [['chat', /already has its 50 attached images/], ['daily', /up to 100 images a day/]]) {
+    const store = fakeStore()
+    calls.length = 0
+    await assert.rejects(storeDesignAssets(CHAT, USER, [image, image], store, quota(limit)), (error) => error instanceof DesignAssetLimitError && message.test(error.message))
+    assert.equal(store.files.size, 0, 'nothing stored past a cap')
+    assert.deepEqual(calls, [['reserve', CHAT, USER, 2]])
+  }
+  calls.length = 0
+  await assert.rejects(storeDesignAssets(CHAT, USER, [image, image], fakeStore({ failOn: 0 }), quota('ok')), /Unable to store/)
+  assert.deepEqual(calls, [['reserve', CHAT, USER, 2], ['release', CHAT, USER, 2]])
+})
+
+test('an image is read only for the chat that received it', async () => {
+  manifests.clear()
+  const store = fakeStore()
+  const [handle] = await storeDesignAssets(CHAT, USER, [{ type: 'image', data: PNG, mimeType: 'image/png' }], store, OPEN)
+  const image = await readDesignAsset(CHAT, handle, store)
+  assert.deepEqual({ mimeType: image.mimeType, bytes: image.bytes.toString('base64') }, { mimeType: 'image/png', bytes: PNG })
+  assert.equal(await readDesignAsset('22222222-2222-4222-8222-222222222222', handle, store), null)
+  assert.equal(await readDesignAsset(CHAT, HANDLE, store), null)
+})
+
+test('deleting a chat removes all its files, page by page, and no other chat\'s', async () => {
+  manifests.clear()
+  const store = fakeStore()
+  const image = { type: 'image', data: PNG, mimeType: 'image/png' }
+  await storeDesignAssets(CHAT, USER, [image, image, image, image, image], store, OPEN)
+  const [other] = await storeDesignAssets('33333333-3333-4333-8333-333333333333', USER, [image], store, OPEN)
+  await deleteDesignAssets(CHAT, store)
+  assert.deepEqual([...store.files.keys()], [`chats/33333333-3333-4333-8333-333333333333/${other}`])
+})
+
+test('a design may name an attached image wherever it may name an image, even with remote images off', () => {
+  for (const body of [
+    `<img src="fx0-asset:${HANDLE}" alt="">`,
+    `<img srcset="fx0-asset:${HANDLE} 2x" alt="">`,
+    `<video poster="fx0-asset:${HANDLE}"></video>`,
+    `<svg><image href="fx0-asset:${HANDLE}"/></svg>`,
+  ]) {
+    assert.equal(validateDesignArtifactHtml(doc(body), { remoteImages: false }).ok, true, body)
+  }
+  assert.equal(validateDesignArtifactHtml(doc('<img src="fx0-asset:short" alt="">')).ok, false)
+  assert.equal(validateDesignArtifactHtml(doc(`<script src="fx0-asset:${HANDLE}"></script>`)).ok, false)
+})
+
+test('preparation marks attached images like remote ones; with remote images off only attached ones remain', () => {
+  const html = doc(`<img src="fx0-asset:${HANDLE}"><img src="https://example.com/a.png">`, `<style>.a{background:url(fx0-asset:${HANDLE})}</style>`)
+  const nonce = '0123456789abcdef0123456789abcdef'
+  const marked = markRemoteImages(html, nonce)
+  assert.deepEqual(marked.images.map(({ url }) => url), [`fx0-asset:${HANDLE}`, 'https://example.com/a.png'])
+  assert.equal(marked.html.split(`fx0-image-${nonce}-0`).length - 1, 2)
+  const local = markRemoteImages(html, nonce, { remote: false })
+  assert.deepEqual(local.images.map(({ url }) => url), [`fx0-asset:${HANDLE}`])
+  assert.ok(local.html.includes(`<img src="${BLANK_IMAGE}">`), 'the remote one is blank')
+})
+
+test('returning null leaves a reference as written, so an export can embed only attached images', () => {
+  const html = doc(`<img src="fx0-asset:${HANDLE}"><img src="https://example.com/a.png">`)
+  const data = `data:image/png;base64,${PNG}`
+  const out = rewriteRemoteImages(html, (reference) => reference.startsWith('fx0-asset:') ? data : null)
+  assert.ok(out.includes(`<img src="${data}">`))
+  assert.ok(out.includes('<img src="https://example.com/a.png">'))
+})
+
+test('the image route signs attached-image references per chat', () => {
+  const reference = `fx0-asset:${HANDLE}`
+  const sig = new URL(artifactImageSrc(CHAT, reference), 'https://fx0.example').searchParams.get('sig')
+  assert.equal(verifyArtifactImage(CHAT, reference, sig), reference)
+  assert.equal(verifyArtifactImage('22222222-2222-4222-8222-222222222222', reference, sig), null)
+  assert.equal(verifyArtifactImage(CHAT, 'fx0-asset:short', sig), null)
+})

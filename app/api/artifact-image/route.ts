@@ -1,28 +1,35 @@
 import { verifyArtifactImage } from '../../../lib/artifact-image'
+import { assetReference } from '../../../lib/design-artifact'
+import { readDesignAsset } from '../../../lib/design-assets'
 import { cachedRemoteImage } from '../../../lib/remote-image-cache'
 import { withSessionRoute } from '../../../lib/route-auth'
 import { log } from '../../../lib/session'
 
 export const maxDuration = 30
 
-// One image of a design, for the wrapper artifact-frame serves (see lib/artifact-image.ts).
+// One image of a design, remote or attached, for the wrapper artifact-frame serves (see lib/artifact-image.ts).
 // The design itself never reaches this route: its CSP allows no connections and its
 // frame is credentialless. The bytes come from the shared cache artifact-frame warms.
 export const GET = withSessionRoute(async (request, { id: sessionId }) => {
   const params = new URL(request.url).searchParams
   const url = verifyArtifactImage(sessionId, params.get('u'), params.get('sig'))
   if (!url) return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } })
-  let image: string
+  let image: { bytes: Buffer; mimeType: string } | null
   try {
-    image = await cachedRemoteImage(url)
+    const asset = assetReference(url)
+    if (asset) image = await readDesignAsset(sessionId, asset.slice('fx0-asset:'.length))
+    else {
+      const data = await cachedRemoteImage(url)
+      image = { bytes: Buffer.from(data.slice(data.indexOf(',') + 1), 'base64'), mimeType: data.slice('data:'.length, data.indexOf(';')) }
+    }
   } catch (error) {
-    log(sessionId, 'artifact-image:failed', { host: new URL(url).host, reason: (error as Error).message.slice(0, 80) })
-    return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } })
+    log(sessionId, 'artifact-image:failed', { image: assetReference(url) ? 'asset' : new URL(url).host, reason: (error as Error).message.slice(0, 80) })
+    image = null
   }
-  const comma = image.indexOf(',')
-  return new Response(Buffer.from(image.slice(comma + 1), 'base64'), {
+  if (!image) return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } })
+  return new Response(new Uint8Array(image.bytes), {
     headers: {
-      'content-type': image.slice('data:'.length, image.indexOf(';')),
+      'content-type': image.mimeType,
       'cache-control': 'private, max-age=86400',
       'content-security-policy': "default-src 'none'; sandbox",
       'x-content-type-options': 'nosniff',

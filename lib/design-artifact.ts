@@ -18,6 +18,16 @@ export function remoteImageUrl(value: string): string | null {
   return url.href.length <= MAX_REMOTE_IMAGE_URL_LENGTH ? url.href : null
 }
 
+// An image the user attached, stored by fx0 (lib/design-assets.ts) and named in a design
+// as fx0-asset:<id>. Like a remote image it is embedded before the design runs.
+const ASSET_REFERENCE = /^fx0-asset:[A-Za-z0-9_-]{24}$/
+export function assetReference(value: string): string | null {
+  return ASSET_REFERENCE.test(value) ? value : null
+}
+
+// Anything the design may name as an image besides data:, as the rewriter sees it.
+const imageReference = (value: string) => assetReference(value) ?? remoteImageUrl(value)
+
 export const DESIGN_ARTIFACT_EMBEDDED_CSP = [
   "default-src 'none'",
   "script-src 'unsafe-inline'",
@@ -333,7 +343,7 @@ interface SrcsetCandidate {
 
 // A srcset of remote image candidates, split the way the HTML parser splits it (a URL
 // runs to whitespace; trailing commas end it), or null when any candidate is not one.
-function remoteSrcset(value: string): SrcsetCandidate[] | null {
+function remoteSrcset(value: string, accept: (url: string) => string | null = imageReference): SrcsetCandidate[] | null {
   const candidates: SrcsetCandidate[] = []
   let index = 0
   while (index < value.length) {
@@ -350,16 +360,18 @@ function remoteSrcset(value: string): SrcsetCandidate[] | null {
       while (index < value.length && value[index] !== ',') index++
       descriptor = value.slice(descriptorStart, index).trim()
     }
-    const url = remoteImageUrl(raw)
+    const url = accept(raw)
     if (!url || !/^(?:\d+(?:\.\d+)?[wx])?$/.test(descriptor)) return null
     candidates.push({ url, descriptor })
   }
   return candidates.length ? candidates : null
 }
 
-const remoteImageValue = (rawValue: string) => remoteImageUrl(decodeAttribute(rawValue))
+const remoteImageValue = (rawValue: string) => imageReference(decodeAttribute(rawValue))
 
 function validateTag(tag: HtmlTag, remote: boolean): string | null {
+  const allowed = (value: string) => assetReference(value) ?? (remote ? remoteImageUrl(value) : null)
+  const allowedValue = (rawValue: string) => allowed(decodeAttribute(rawValue))
   if (tag.duplicateAttribute) {
     return `design artifact must not repeat the ${tag.duplicateAttribute} attribute`
   }
@@ -385,25 +397,25 @@ function validateTag(tag: HtmlTag, remote: boolean): string | null {
     }
     if (name === 'href' || name === 'xlink:href') {
       const value = decodeAttribute(rawValue)
-      const isSafeSvgImage = tag.name === 'image' && (/^data:image\//i.test(value) || (remote && !!remoteImageUrl(value)))
+      const isSafeSvgImage = tag.name === 'image' && (/^data:image\//i.test(value) || !!allowed(value))
       // Links to https pages (cited sources, references) open in a new tab; see the bootstrap.
       const isExternalLink = tag.name === 'a' && name === 'href' && /^https:\/\/[^\s]+$/i.test(value)
       if (!value.startsWith('#') && !isSafeSvgImage && !isExternalLink) {
         return `design artifact ${name} values must be local fragments, https links, or compatible embedded data: URLs`
       }
     }
-    if (name === 'src' && !isEmbeddedSource(tag.name, rawValue) && !(remote && tag.name === 'img' && remoteImageValue(rawValue))) {
+    if (name === 'src' && !isEmbeddedSource(tag.name, rawValue) && !(tag.name === 'img' && allowedValue(rawValue))) {
       return remote
         ? 'design artifact src values must be an https image URL on <img> or a compatible embedded data: URL'
         : 'design artifact src values must use a compatible embedded data: URL'
     }
     if (name === 'srcset' && !isEmbeddedSrcset(tag.name, rawValue) &&
-      !(remote && (tag.name === 'img' || tag.name === 'source') && remoteSrcset(decodeAttribute(rawValue)))) {
+      !((tag.name === 'img' || tag.name === 'source') && remoteSrcset(decodeAttribute(rawValue), allowed))) {
       return remote
         ? 'design artifact srcset values must list https image URLs or contain one embedded data:image URL'
         : 'design artifact srcset values must contain one embedded data:image URL'
     }
-    if (name === 'poster' && !/^data:image\//i.test(decodeAttribute(rawValue)) && !(remote && remoteImageValue(rawValue))) {
+    if (name === 'poster' && !/^data:image\//i.test(decodeAttribute(rawValue)) && !allowedValue(rawValue)) {
       return remote
         ? 'design artifact poster values must use an https image URL or an embedded data:image URL'
         : 'design artifact poster values must use an embedded data:image URL'
@@ -417,9 +429,10 @@ function validateTag(tag: HtmlTag, remote: boolean): string | null {
 // places validation accepts it, becomes `embed(url)`, a data: image URL. The stored
 // design is untouched; text, scripts and anything else that merely contains a URL are
 // never rewritten. A srcset keeps only its largest candidate, so each image is fetched once.
-export function rewriteRemoteImages(html: string, embed: (url: string) => string): string {
+export function rewriteRemoteImages(html: string, embed: (url: string) => string | null): string {
   const edits: (SourceRange & { text: string })[] = []
-  const image = (url: string) => embeddedImage(embed(url))
+  // embed() returning null leaves that reference as written (the export keeps remote URLs).
+  const image = (url: string) => { const value = embed(url); return value == null ? null : embeddedImage(value) }
   const lower = html.toLowerCase()
   for (const tag of parseOpeningTags(html)) {
     for (const [name, range] of tag.valueRanges) {
@@ -429,16 +442,17 @@ export function rewriteRemoteImages(html: string, embed: (url: string) => string
       else if (name === 'poster' && tag.name === 'video') url = remoteImageValue(raw)
       else if ((name === 'href' || name === 'xlink:href') && tag.name === 'image') url = remoteImageValue(raw)
       else if (name === 'srcset' && (tag.name === 'img' || tag.name === 'source')) url = largestCandidate(decodeAttribute(raw))
-      if (url) {
-        edits.push({ ...range, text: `"${image(url)}"` })
+      const replacement = url ? image(url) : null
+      if (replacement) {
+        edits.push({ ...range, text: `"${replacement}"` })
       } else if (name === 'style') {
         const quoted = html[range.start] === '"' || html[range.start] === "'"
         const inner = quoted ? { start: range.start + 1, end: range.end - 1 } : range
-        for (const edit of cssUrlEdits(html, lower, inner, true)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
+        for (const edit of cssUrlEdits(html, lower, inner, true)) { const value = image(edit.url); if (value) edits.push({ ...edit, text: `url(${value})` }) }
       }
     }
     if (tag.content) {
-      for (const edit of cssUrlEdits(html, lower, tag.content, false)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
+      for (const edit of cssUrlEdits(html, lower, tag.content, false)) { const value = image(edit.url); if (value) edits.push({ ...edit, text: `url(${value})` }) }
     }
   }
   // One pass, so the cost grows with the output, not with the number of edits.
@@ -507,7 +521,7 @@ function cssUrlEdits(source: string, lower: string, range: SourceRange, inAttrib
       const token = cssUrlToken(source, lower, index + 4, range.end, quoteAt, closeAfter)
       if (token) {
         const value = (inAttribute ? decodeAttribute(token.value) : token.value).trim()
-        const url = value.includes('\\') ? null : remoteImageUrl(value)
+        const url = value.includes('\\') ? null : imageReference(value)
         if (url) edits.push({ start: index, end: token.end, url })
         index = token.end
         continue

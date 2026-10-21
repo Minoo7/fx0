@@ -95,6 +95,11 @@ const mocks = {
         lastActivity: stored.lastActivity, busy: false }))
         .sort((a, b) => b.lastActivity - a.lastActivity).slice(0, 100);
     }
+    export async function readDesignAssets() { return new Map(); }
+    export async function recordDesignAssets() {}
+    export const MAX_CHAT_ASSETS = 50; export const MAX_DAILY_ASSETS = 100;
+    export async function reserveDesignAssets() { return 'ok'; }
+    export async function releaseDesignAssets() {}
     export async function readDesignArtifact(id) { record('artifact', id); return '<!doctype html><html><head><title>private design</title></head><body>private artifact</body></html>'; }
     export async function readDesignArtifactAt(id) {
       const s = record('artifact', id);
@@ -108,6 +113,7 @@ const mocks = {
       globalThis.securityTest.trace.push(name);
     }
     export async function warmChat(host) { effect('warm', host); }
+    export function assertPromptFunding() {}
     export function log() {}
     export async function submitPrompt(host, author, ...args) { effect('prompt', host); globalThis.securityTest.author = author; globalThis.securityTest.text = args[0]; globalThis.securityTest.funding = args[5]; return { id: 1, seq: globalThis.securityTest.submittedSeq ?? 1, trialChat: !!args[5] || !!globalThis.securityTest.generationOptions?.trialChat }; }
     export async function followChat(host) { effect('wake', host); }

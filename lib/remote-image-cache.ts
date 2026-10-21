@@ -1,5 +1,5 @@
 import { cacheLife } from 'next/cache.js'
-import { BLANK_IMAGE, MAX_DESIGN_ARTIFACT_BYTES, remoteImagesEnabled, rewriteRemoteImages } from './design-artifact'
+import { BLANK_IMAGE, MAX_DESIGN_ARTIFACT_BYTES, remoteImagesEnabled, remoteImageUrl, rewriteRemoteImages } from './design-artifact'
 import type { DesignDraftObserver } from './gateway-session'
 import { loadRemoteImage, MAX_REMOTE_IMAGES } from './remote-image'
 
@@ -22,7 +22,7 @@ export function prefetchRemoteImages(observer: DesignDraftObserver | undefined, 
   const started = new Set<string>()
   const scan = (html: string) => {
     rewriteRemoteImages(html, (url: string) => {
-      if (!started.has(url) && started.size < MAX_REMOTE_IMAGES) {
+      if (remoteImageUrl(url) && !started.has(url) && started.size < MAX_REMOTE_IMAGES) {
         started.add(url)
         void load(url).catch(() => {})
       }
