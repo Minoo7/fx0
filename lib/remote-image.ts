@@ -3,17 +3,16 @@ import { BLANK_IMAGE, rewriteRemoteImages } from './design-artifact.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { sniffImageType } from './image-sniff.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { fetchPublicImage, MAX_IMAGE_FETCH_BYTES } from './public-fetch.ts'
+import { fetchPublicImage } from './public-fetch.ts'
 
 // A design never touches the network while it runs: a script could choose which
-// requests to make and so leak what the viewer types. fx0 fetches the remote images
-// the stored markup names, before the design runs, and embeds them as data: URLs.
-// What is fetched depends only on the stored design, never on the viewer.
+// requests to make and so leak what the viewer types. The images the stored markup
+// names are embedded as data: URLs before the design runs: artifact-frame marks them,
+// and its wrapper (fx0's own code, not the design) loads them from /api/artifact-image,
+// where the browser keeps them across revisions. What is loaded depends only on the
+// stored design, never on the viewer.
 
 export const MAX_REMOTE_IMAGES = 12
-// Counted per place an image is written. With the 512 KiB design limit this bounds a
-// prepared preview to about 6 MiB, and the artifact-frame response to about 8 MiB.
-export const MAX_REMOTE_IMAGES_TOTAL_BYTES = 4 * 1024 * 1024
 
 /** One remote image as a data: URL. Throws when it is unreachable, too large or not an image. */
 export async function loadRemoteImage(url: string): Promise<string> {
@@ -24,35 +23,18 @@ export async function loadRemoteImage(url: string): Promise<string> {
 }
 
 /**
- * The design with its remote images embedded, within the count and size budgets; any
- * other one becomes a blank image. The size budget counts every place an image is
- * written, since each one carries the whole image, so a repeated image cannot expand
- * the preview past it. `complete` is false when an image failed to load, so the
- * caller does not let a browser keep that copy.
+ * The design with each remote image replaced by a marker the wrapper swaps for the
+ * image, in document order, at most MAX_REMOTE_IMAGES; any other becomes a blank image.
+ * The nonce is fresh per response, so the design's own text cannot name a marker.
  */
-export async function embedRemoteImages(html: string, load: (url: string) => Promise<string>): Promise<{ html: string; complete: boolean; images: number }> {
+export function markRemoteImages(html: string, nonce: string): { html: string; images: { marker: string; url: string }[] } {
   const urls: string[] = []
   rewriteRemoteImages(html, (url: string) => {
     if (!urls.includes(url)) urls.push(url)
     return BLANK_IMAGE
   })
-  if (!urls.length) return { html, complete: true, images: 0 }
-  const wanted = urls.slice(0, MAX_REMOTE_IMAGES)
-  const loaded = await Promise.all(wanted.map((url) => load(url).catch(() => null)))
-  const embedded = new Map<string, string>()
-  for (const [index, image] of loaded.entries()) {
-    if (image && imageBytes(image) <= MAX_IMAGE_FETCH_BYTES) embedded.set(wanted[index], image)
-  }
-  let total = 0
-  const rewritten = rewriteRemoteImages(html, (url: string) => {
-    const image = embedded.get(url)
-    if (!image || total + imageBytes(image) > MAX_REMOTE_IMAGES_TOTAL_BYTES) return BLANK_IMAGE
-    total += imageBytes(image)
-    return image
-  })
-  return { html: rewritten, complete: loaded.every(Boolean), images: wanted.length }
-}
-
-function imageBytes(image: string): number {
-  return Math.floor((image.length - image.indexOf(',') - 1) * 3 / 4)
+  const images = urls.slice(0, MAX_REMOTE_IMAGES).map((url, index) => ({ marker: `fx0-image-${nonce}-${index}`, url }))
+  if (!images.length) return { html, images }
+  const markers = new Map(images.map(({ marker, url }) => [url, marker]))
+  return { html: rewriteRemoteImages(html, (url: string) => markers.get(url) ?? BLANK_IMAGE), images }
 }
