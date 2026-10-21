@@ -5,7 +5,7 @@ import dns from 'node:dns/promises'
 import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
 import { BLANK_IMAGE, DESIGN_ARTIFACT_EMBEDDED_CSP, remoteImageUrl, rewriteRemoteImages, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
-import { embedRemoteImages, loadRemoteImage, MAX_REMOTE_IMAGES } from '../lib/remote-image.ts'
+import { embedRemoteImages, loadRemoteImage, MAX_REMOTE_IMAGES, MAX_REMOTE_IMAGES_TOTAL_BYTES } from '../lib/remote-image.ts'
 import { sniffImageType } from '../lib/image-sniff.ts'
 import { MAX_IMAGE_FETCH_BYTES } from '../lib/public-fetch.ts'
 
@@ -93,6 +93,20 @@ test('embedding fetches each image once, in document order, within the count and
   const big = `data:image/png;base64,${'A'.repeat(Math.ceil(MAX_IMAGE_FETCH_BYTES * 4 / 3) - 8)}`
   const sized = await embedRemoteImages(doc('<img src="https://example.com/1.png"><img src="https://example.com/2.png"><img src="https://example.com/3.png"><img src="https://example.com/4.png">'), async () => big)
   assert.equal(sized.html.split(big).length - 1, 3, 'the total budget stops the fourth large image')
+})
+
+test('the size budget counts every place an image is written, so repeating one cannot expand the preview', async () => {
+  const big = `data:image/png;base64,${'A'.repeat(Math.ceil(1024 * 1024 * 4 / 3))}`
+  const source = doc('<img src="https://example.com/big.png">'.repeat(20) + '<div style="background:url(https://example.com/big.png)"></div>'.repeat(20))
+  const result = await embedRemoteImages(source, async () => big)
+  assert.equal(result.html.split(big).length - 1, 4, 'four 1 MiB copies fill the 4 MiB budget')
+  assert.ok(result.html.length < source.length + MAX_REMOTE_IMAGES_TOTAL_BYTES * 4 / 3 + 40 * BLANK_IMAGE.length)
+
+  const many = doc('<img src="https://example.com/tiny.png">'.repeat(20_000))
+  const started = performance.now()
+  const tiny = await embedRemoteImages(many, async () => PNG_URL)
+  assert.equal(tiny.html.split(PNG_URL).length - 1, 20_000)
+  assert.ok(performance.now() - started < 2_000, 'rewriting grows with the output, not with the number of edits')
 })
 
 test('a failed image is blank and the copy is marked incomplete; a design without remote images is untouched', async () => {

@@ -352,9 +352,15 @@ export function rewriteRemoteImages(html: string, embed: (url: string) => string
       for (const edit of cssUrlEdits(html, tag.content, false)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
     }
   }
-  let result = html
-  for (const edit of edits.sort((a, b) => b.start - a.start)) result = result.slice(0, edit.start) + edit.text + result.slice(edit.end)
-  return result
+  // One pass, so the cost grows with the output, not with the number of edits.
+  const parts: string[] = []
+  let cursor = 0
+  for (const edit of edits.sort((a, b) => a.start - b.start)) {
+    parts.push(html.slice(cursor, edit.start), edit.text)
+    cursor = edit.end
+  }
+  parts.push(html.slice(cursor))
+  return parts.join('')
 }
 
 // The embedded value lands unquoted in CSS url() and quoted in attributes, so it must
