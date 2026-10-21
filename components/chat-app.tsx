@@ -1314,9 +1314,10 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     }
 
     try {
-      const previews = images.length
-        ? (await Promise.all(images.map((image) => imageThumbnail(image.preview)))).filter((preview): preview is string => !!preview)
-        : []
+      // Made at attach time; computed here only for images restored from a guest draft.
+      // Sent only when every image has one, so none is shown on the wrong image.
+      const thumbnails = await Promise.all(images.map((image) => image.thumbnail ?? imageThumbnail(image.preview)))
+      const previews = thumbnails.every(Boolean) ? thumbnails as string[] : []
       const promptSession = !creating ? targetSession : reservedId ?? 'new'
       const response = await fetchUi(`/api/prompt?session=${encodeURIComponent(promptSession)}`, {
         method: 'POST',
