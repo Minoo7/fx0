@@ -43,8 +43,9 @@ export async function publicDestination(input: string, resolve = dns.lookup) {
   return { url, address: addresses[0] }
 }
 
-// Remote images a design shows, fetched by the image proxy. Only https, every hop.
-export const MAX_IMAGE_FETCH_BYTES = 8 * 1024 * 1024
+// Remote images fx0 embeds in a design. Only https, every hop. Each one is cached as a
+// base64 data: URL in one Runtime Cache entry, which holds at most 2 MB.
+export const MAX_IMAGE_FETCH_BYTES = 1.25 * 1024 * 1024
 
 interface FetchOptions { maxBytes: number; httpsOnly?: boolean; accept?: string }
 

@@ -1,67 +1,49 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { BLANK_IMAGE, rewriteRemoteImages } from './design-artifact.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { sniffImageType } from './image-sniff.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { fetchPublicImage, MAX_IMAGE_FETCH_BYTES } from './public-fetch.ts'
 
-// A design shows remote images only through /api/remote-image, at URLs this server
-// signed while preparing the preview. Scripts in the design cannot sign, so they can
-// load only the images its markup named and cannot carry data out in a new URL.
+// A design never touches the network while it runs: a script could choose which
+// requests to make and so leak what the viewer types. fx0 fetches the remote images
+// the stored markup names, before the design runs, and embeds them as data: URLs.
+// What is fetched depends only on the stored design, never on the viewer.
 
-export const REMOTE_IMAGE_PATH = '/api/remote-image/'
-export const MAX_REMOTE_IMAGE_URL_LENGTH = 2048
+export const MAX_REMOTE_IMAGES = 12
+export const MAX_REMOTE_IMAGES_TOTAL_BYTES = 4 * 1024 * 1024
 
-const DAY_MS = 24 * 3600_000
-// Signed URLs stay the same for a day (so the CDN can cache them) and work for at
-// least seven more; a cached preview revalidates daily and receives fresh ones.
-const VALID_DAYS = 8
-
-export function remoteImagesEnabled(): boolean {
-  return process.env.FX0_REMOTE_IMAGES !== '0'
+/** One remote image as a data: URL. Throws when it is unreachable, too large or not an image. */
+export async function loadRemoteImage(url: string): Promise<string> {
+  const { body } = await fetchPublicImage(url, AbortSignal.timeout(5_000))
+  const type = sniffImageType(body)
+  if (!type) throw new Error('Not an image')
+  return `data:${type};base64,${body.toString('base64')}`
 }
 
-/** The URL fx0 will sign and fetch: absolute https, no credentials, bounded; else null. */
-export function remoteImageUrl(value: string): string | null {
-  if (!/^https:\/\//i.test(value) || value.length > MAX_REMOTE_IMAGE_URL_LENGTH) return null
-  let url: URL
-  try {
-    url = new URL(value)
-  } catch {
-    return null
+/**
+ * The design with its remote images embedded, in document order, within the count
+ * and size budgets; any other one becomes a blank image. `complete` is false when an
+ * image failed, so the caller does not let a browser keep that copy.
+ */
+export async function embedRemoteImages(html: string, load: (url: string) => Promise<string>): Promise<{ html: string; complete: boolean }> {
+  const urls: string[] = []
+  rewriteRemoteImages(html, (url: string) => {
+    if (!urls.includes(url)) urls.push(url)
+    return BLANK_IMAGE
+  })
+  if (!urls.length) return { html, complete: true }
+  const wanted = urls.slice(0, MAX_REMOTE_IMAGES)
+  const loaded = await Promise.all(wanted.map((url) => load(url).catch(() => null)))
+  const embedded = new Map<string, string>()
+  let total = 0
+  for (const [index, image] of loaded.entries()) {
+    if (!image) continue
+    const bytes = Math.floor((image.length - image.indexOf(',') - 1) * 3 / 4)
+    if (bytes > MAX_IMAGE_FETCH_BYTES || total + bytes > MAX_REMOTE_IMAGES_TOTAL_BYTES) continue
+    total += bytes
+    embedded.set(wanted[index], image)
   }
-  if (url.protocol !== 'https:' || url.username || url.password || !url.hostname) return null
-  return url.href.length <= MAX_REMOTE_IMAGE_URL_LENGTH ? url.href : null
-}
-
-export function remoteImageEpoch(now = Date.now()): number {
-  return Math.floor(now / DAY_MS)
-}
-
-function signingKey(): Buffer {
-  const secret = process.env.SESSION_SECRET
-  if (!secret || secret.length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters')
-  return createHmac('sha256', secret).update('fx0 remote-image signing key v1').digest()
-}
-
-function signature(expires: number, url: string): Buffer {
-  return createHmac('sha256', signingKey()).update(`v1:remote-image:${expires}:${url}`).digest()
-}
-
-/** An absolute proxy URL for `url` (already normalized by remoteImageUrl). */
-export function signRemoteImage(origin: string, url: string, now = Date.now()): string {
-  const expires = (remoteImageEpoch(now) + VALID_DAYS) * (DAY_MS / 1000)
-  const sig = signature(expires, url).toString('base64url')
-  // Also encodes ! ' ( ) *, so the URL can sit unquoted in CSS url() and in any attribute.
-  const encoded = encodeURIComponent(url).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
-  return `${origin}${REMOTE_IMAGE_PATH}${sig}?exp=${expires}&u=${encoded}`
-}
-
-/** The URL a signed proxy request may fetch, or null. */
-export function verifyRemoteImage(sig: string, exp: string | null, value: string | null, now = Date.now()): string | null {
-  if (!exp || !/^\d{1,12}$/.test(exp) || value == null) return null
-  const expires = Number(exp)
-  const remainingMs = expires * 1000 - now
-  if (remainingMs <= 0 || remainingMs > (VALID_DAYS + 1) * DAY_MS) return null
-  const url = remoteImageUrl(value)
-  if (!url || url !== value) return null
-  if (!/^[A-Za-z0-9_-]{43}$/.test(sig)) return null
-  const given = Buffer.from(sig, 'base64url')
-  const expected = signature(expires, url)
-  return given.length === expected.length && timingSafeEqual(given, expected) ? url : null
+  const complete = loaded.every(Boolean)
+  return { html: rewriteRemoteImages(html, (url: string) => embedded.get(url) ?? BLANK_IMAGE), complete }
 }

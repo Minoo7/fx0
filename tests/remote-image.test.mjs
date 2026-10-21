@@ -2,53 +2,18 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import https from 'node:https'
 import dns from 'node:dns/promises'
-import { registerHooks } from 'node:module'
 import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
+import { BLANK_IMAGE, DESIGN_ARTIFACT_EMBEDDED_CSP, remoteImageUrl, rewriteRemoteImages, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
+import { embedRemoteImages, loadRemoteImage, MAX_REMOTE_IMAGES } from '../lib/remote-image.ts'
+import { sniffImageType } from '../lib/image-sniff.ts'
+import { MAX_IMAGE_FETCH_BYTES } from '../lib/public-fetch.ts'
 
-process.env.SESSION_SECRET = 'deterministic-remote-image-test-secret-32+'
-
-// Route files import lib modules without an extension, as Next resolves them.
-registerHooks({
-  resolve(specifier, context, next) {
-    if (specifier.startsWith('.') && !/\.[a-z]+$/.test(specifier)) return next(`${specifier}.ts`, context)
-    return next(specifier, context)
-  },
-})
-
-const { signRemoteImage, verifyRemoteImage, remoteImageUrl, REMOTE_IMAGE_PATH } = await import('../lib/remote-image.ts')
-const { rewriteRemoteImages, validateDesignArtifactHtml } = await import('../lib/design-artifact.ts')
-const { sniffImageType } = await import('../lib/image-sniff.ts')
-const route = await import('../app/api/remote-image/[sig]/route.ts')
-
-const ORIGIN = 'https://fx0.example'
-const NOW = Date.UTC(2026, 9, 21, 12)
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+const PNG_URL = `data:image/png;base64,${PNG.toString('base64')}`
+const doc = (body, head = '') => `<!doctype html><html><head>${head}</head><body>${body}</body></html>`
 
-function parts(signed) {
-  const url = new URL(signed)
-  return { sig: url.pathname.slice(REMOTE_IMAGE_PATH.length), exp: url.searchParams.get('exp'), u: url.searchParams.get('u') }
-}
-
-test('a signed URL names one remote image until it expires', () => {
-  const image = 'https://images.example.com/a.png?w=100&h=50'
-  const signed = signRemoteImage(ORIGIN, image, NOW)
-  assert.match(signed, /^https:\/\/fx0\.example\/api\/remote-image\/[A-Za-z0-9_-]{43}\?exp=\d+&u=[A-Za-z0-9\-._~%]+$/)
-  const { sig, exp, u } = parts(signed)
-  assert.equal(verifyRemoteImage(sig, exp, u, NOW), image)
-  // Stable within a day, so the CDN can keep serving one URL.
-  assert.equal(signRemoteImage(ORIGIN, image, NOW + 3600_000), signed)
-  assert.equal(verifyRemoteImage(sig, exp, 'https://images.example.com/b.png', NOW), null)
-  assert.equal(verifyRemoteImage(sig, String(Number(exp) + 86400), u, NOW), null)
-  assert.equal(verifyRemoteImage(`${sig.slice(0, -1)}${sig.endsWith('A') ? 'B' : 'A'}`, exp, u, NOW), null)
-  assert.equal(verifyRemoteImage(sig.slice(1), exp, u, NOW), null)
-  assert.equal(verifyRemoteImage(sig, exp, u, Number(exp) * 1000 + 1), null)
-  assert.equal(verifyRemoteImage(sig, exp, u, NOW - 3 * 86400_000), null, 'too far in the future')
-  assert.equal(verifyRemoteImage(sig, null, u, NOW), null)
-  assert.equal(verifyRemoteImage(sig, exp, 'https://IMAGES.example.com/a.png?w=100&h=50', NOW), null, 'only the normalized URL')
-})
-
-test('only absolute https URLs without credentials are signable', () => {
+test('only absolute https URLs without credentials are fetchable', () => {
   assert.equal(remoteImageUrl('https://example.com/a b.png'), 'https://example.com/a%20b.png')
   for (const value of ['http://example.com/a.png', 'https://user:pass@example.com/a.png', '//example.com/a.png', 'https://', `https://example.com/${'a'.repeat(2048)}`]) {
     assert.equal(remoteImageUrl(value), null, value)
@@ -66,15 +31,12 @@ test('image types come from the bytes', () => {
   assert.equal(sniffImageType(PNG.subarray(0, 8)), null)
 })
 
-const proxy = (url) => `${ORIGIN}${REMOTE_IMAGE_PATH}sig?exp=1&u=${encodeURIComponent(url)}`
-const doc = (body, head = '') => `<!doctype html><html><head>${head}</head><body>${body}</body></html>`
-
-test('preparation rewrites remote images in every accepted place and nothing else', () => {
+test('preparation embeds remote images in every accepted place and nothing else', () => {
   const source = doc(
     '<img src="https://example.com/a.png?x=1&amp;y=2" alt="">' +
     "<img src='https://example.com/b.png'>" +
     '<img src=https://example.com/c.png>' +
-    '<img srcset="https://cdn.example.com/w_1,h_1/a.png 1x, https://example.com/b.png 2x">' +
+    '<img srcset="https://cdn.example.com/w_1,h_1/small.png 1x, https://example.com/large.png 2x">' +
     '<picture><source srcset="https://example.com/a.webp"></picture>' +
     '<video poster="https://example.com/p.png"></video>' +
     '<svg><image href="https://example.com/s.png"/><image xlink:href="https://example.com/t.png"/></svg>' +
@@ -89,32 +51,65 @@ test('preparation rewrites remote images in every accepted place and nothing els
     '.d { background: url(https://example.com/esc\\61 pe.png) } .e { background: url(http://example.com/plain.png) }</style>',
   )
   assert.equal(validateDesignArtifactHtml(source).ok, true)
-  const out = rewriteRemoteImages(source, proxy)
-  for (const name of ['a.png?x=1&y=2', 'b.png', 'c.png', 'w_1,h_1/a.png', 'a.webp', 'p.png', 's.png', 't.png', 'bg.png', 'bg2.png', 'bg3.png', 'style.png', 'quoted.png']) {
-    assert.ok(out.includes(encodeURIComponent(`https://${name.startsWith('w_1') ? 'cdn.' : ''}example.com/${name}`)), name)
-  }
+  const embedded = []
+  const out = rewriteRemoteImages(source, (url) => { embedded.push(url); return PNG_URL })
+  assert.deepEqual(embedded.sort(), [
+    'https://example.com/a.png?x=1&y=2', 'https://example.com/b.png', 'https://example.com/c.png', 'https://example.com/large.png',
+    'https://example.com/a.webp', 'https://example.com/p.png', 'https://example.com/s.png', 'https://example.com/t.png',
+    'https://example.com/bg.png', 'https://example.com/bg2.png', 'https://example.com/bg3.png', 'https://example.com/style.png',
+    'https://example.com/quoted.png',
+  ].sort(), 'a srcset embeds only its largest candidate')
   for (const untouched of ['https://example.com/text.png', 'url(https://example.com/text2.png)', 'href="https://example.com/page"',
     '"https://example.com/script.png"', 'url(https://example.com/script2.png)', 'url(https://example.com/comment.png)',
     '"url(https://example.com/string.png)"', 'url(https://example.com/esc\\61 pe.png)', 'url(http://example.com/plain.png)',
     'src="data:image/gif;base64,R0lGODlhAQABAAAAACw="']) {
     assert.ok(out.includes(untouched), untouched)
   }
-  assert.ok(out.includes('srcset="https://fx0.example/api/remote-image/sig?exp=1&amp;u='), 'srcset values stay attribute-escaped')
-  assert.ok(out.includes(' 2x"'), 'srcset descriptors survive')
-  assert.ok(out.includes('background-image: url(https://fx0.example/api/remote-image/sig?exp=1&amp;u='), 'style attributes stay attribute-escaped')
-  assert.ok(out.includes('url(https://fx0.example/api/remote-image/sig?exp=1&u=https%3A%2F%2Fexample.com%2Fstyle.png)'), '<style> text is raw')
-  assert.equal(rewriteRemoteImages(source, proxy), out, 'deterministic')
+  assert.ok(!out.includes('small.png'), 'the smaller srcset candidate is dropped')
+  assert.ok(out.includes(`srcset="${PNG_URL}"`))
+  assert.ok(out.includes(`background-image: url(${PNG_URL}); color: red`))
+  assert.ok(out.includes(`.a { background: url(${PNG_URL}) }`))
 })
 
-test('a proxy URL cannot break out of the attribute or CSS it lands in', () => {
-  const out = rewriteRemoteImages(doc('<img src="https://example.com/a.png">', '<style>.a{background:url(https://example.com/b.png)}</style>'),
-    () => `${ORIGIN}/x?u=") '<>( *`)
-  const safe = /^[A-Za-z0-9\-._~%&;=?\/:+]+$/
-  assert.match(out.match(/<img src="([^"]*)"/)[1], safe)
-  assert.match(out.match(/url\(([^)]*)\)/)[1], safe)
+test('anything but a base64 data: image becomes a blank image, so nothing can break out', () => {
+  for (const value of ['https://example.com/a.png', 'data:image/svg+xml;base64,PHN2Zz4=', `${PNG_URL}"><script>`, 'data:image/png;base64,a b']) {
+    const out = rewriteRemoteImages(doc('<img src="https://example.com/a.png">', '<style>.a{background:url(https://example.com/b.png)}</style>'), () => value)
+    assert.ok(out.includes(`<img src="${BLANK_IMAGE}">`), value)
+    assert.ok(out.includes(`url(${BLANK_IMAGE})`), value)
+  }
 })
 
-// The proxy's upstream: DNS and https.request are faked, the way tests/public-fetch.test.mjs does.
+test('embedding fetches each image once, in document order, within the count and size budgets', async () => {
+  const urls = Array.from({ length: MAX_REMOTE_IMAGES + 2 }, (_, index) => `https://example.com/${index}.png`)
+  const html = doc(urls.map((url) => `<img src="${url}">`).join('') + `<img src="${urls[0]}">`)
+  const fetched = []
+  const result = await embedRemoteImages(html, async (url) => { fetched.push(url); return PNG_URL })
+  assert.deepEqual(fetched, urls.slice(0, MAX_REMOTE_IMAGES))
+  assert.equal(result.complete, true)
+  assert.equal(result.html.split(PNG_URL).length - 1, MAX_REMOTE_IMAGES + 1, 'a repeated image is embedded everywhere it appears')
+  assert.equal(result.html.split(BLANK_IMAGE).length - 1, 2, 'images past the count budget are blank')
+  assert.ok(!result.html.includes('https://'))
+
+  const big = `data:image/png;base64,${'A'.repeat(Math.ceil(MAX_IMAGE_FETCH_BYTES * 4 / 3) - 8)}`
+  const sized = await embedRemoteImages(doc('<img src="https://example.com/1.png"><img src="https://example.com/2.png"><img src="https://example.com/3.png"><img src="https://example.com/4.png">'), async () => big)
+  assert.equal(sized.html.split(big).length - 1, 3, 'the total budget stops the fourth large image')
+})
+
+test('a failed image is blank and the copy is marked incomplete; a design without remote images is untouched', async () => {
+  const html = doc('<img src="https://example.com/ok.png"><img src="https://example.com/down.png">')
+  const result = await embedRemoteImages(html, async (url) => { if (url.endsWith('down.png')) throw new Error('down'); return PNG_URL })
+  assert.equal(result.complete, false)
+  assert.ok(result.html.includes(`<img src="${PNG_URL}"><img src="${BLANK_IMAGE}">`))
+  const plain = doc('<p>no images</p>')
+  assert.deepEqual(await embedRemoteImages(plain, async () => { throw new Error('never called') }), { html: plain, complete: true })
+})
+
+test('embedded designs need no network: the CSP stays data-only', () => {
+  assert.match(DESIGN_ARTIFACT_EMBEDDED_CSP, /img-src data:;/)
+  assert.doesNotMatch(DESIGN_ARTIFACT_EMBEDDED_CSP, /https?:/)
+})
+
+// The upstream: DNS and https.request are faked, the way tests/public-fetch.test.mjs does.
 const PUBLIC_IP = '93.184.216.34'
 function upstream(t, replies, address = PUBLIC_IP) {
   const requests = []
@@ -133,67 +128,39 @@ function upstream(t, replies, address = PUBLIC_IP) {
   return requests
 }
 
-async function get(signed, extra = '') {
-  const { sig } = parts(signed)
-  return route.GET(new Request(`${signed}${extra}`), { params: Promise.resolve({ sig }) })
-}
-
-test('the proxy returns a signed remote image as an image that cannot run', async (t) => {
+test('a remote image loads as a data: URL typed by its bytes, without cookies or referrer', async (t) => {
   const requests = upstream(t, [{ statusCode: 200, headers: { 'content-type': 'text/html' }, chunks: [PNG] }])
-  const response = await get(signRemoteImage(ORIGIN, 'https://images.example.com/a.png'))
-  assert.equal(response.status, 200)
-  assert.equal(response.headers.get('content-type'), 'image/png', 'the type comes from the bytes, not the upstream header')
-  assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
-  assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; sandbox")
-  assert.match(response.headers.get('cache-control'), /^public, .*s-maxage=86400/)
-  assert.equal(response.headers.get('set-cookie'), null)
-  assert.deepEqual(Buffer.from(await response.arrayBuffer()), PNG)
+  assert.equal(await loadRemoteImage('https://images.example.com/a.png'), PNG_URL)
   assert.equal(requests.length, 1)
   assert.equal(requests[0].url, 'https://images.example.com/a.png')
   assert.equal(requests[0].options.headers.cookie, undefined)
   assert.equal(requests[0].options.headers.referer, undefined)
 })
 
-async function assertBlank(response) {
-  assert.equal(response.status, 200)
-  assert.equal(response.headers.get('content-type'), 'image/gif')
-  assert.equal(response.headers.get('cache-control'), 'no-store')
-  assert.equal((await response.arrayBuffer()).byteLength, 42)
-}
-
-test('unsigned, tampered or extended requests get a blank image and never reach upstream', async (t) => {
-  const requests = upstream(t, [])
-  const signed = signRemoteImage(ORIGIN, 'https://images.example.com/a.png')
-  await assertBlank(await get(signed, '&leak=secret'))
-  await assertBlank(await get(signed.replace('a.png', 'b.png')))
-  await assertBlank(await get(signed.replace(/exp=\d+/, 'exp=9999999999')))
-  await assertBlank(await get(`${ORIGIN}${REMOTE_IMAGE_PATH}${'A'.repeat(43)}?exp=1&u=https%3A%2F%2Fexample.com%2Fa.png`))
-  assert.equal(requests.length, 0)
-})
-
-test('the proxy refuses private destinations, plain http redirects and non-images', async (t) => {
+test('loading refuses private destinations, plain http redirects, non-images, errors and oversized bodies', async (t) => {
   let requests = upstream(t, [], '10.0.0.1')
-  await assertBlank(await get(signRemoteImage(ORIGIN, 'https://internal.example.com/a.png')))
+  await assert.rejects(loadRemoteImage('https://internal.example.com/a.png'))
   assert.equal(requests.length, 0, 'a private address is refused before connecting')
   t.mock.restoreAll()
   requests = upstream(t, [{ statusCode: 302, headers: { location: 'http://images.example.com/a.png' }, chunks: [] }])
-  await assertBlank(await get(signRemoteImage(ORIGIN, 'https://images.example.com/a.png')))
+  await assert.rejects(loadRemoteImage('https://images.example.com/a.png'), /HTTPS required/)
   assert.equal(requests.length, 1, 'the http hop is never opened')
   t.mock.restoreAll()
-  for (const chunks of [[Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>')], [Buffer.from('<!doctype html><script>alert(1)</script>')]]) {
-    upstream(t, [{ statusCode: 200, headers: { 'content-type': 'image/png' }, chunks }])
-    await assertBlank(await get(signRemoteImage(ORIGIN, 'https://images.example.com/a.png')))
+  for (const reply of [
+    { statusCode: 200, headers: { 'content-type': 'image/png' }, chunks: [Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>')] },
+    { statusCode: 200, headers: { 'content-type': 'image/png' }, chunks: [Buffer.from('<!doctype html><script>alert(1)</script>')] },
+    { statusCode: 404, headers: {}, chunks: [PNG] },
+    { statusCode: 200, headers: { 'content-length': String(MAX_IMAGE_FETCH_BYTES + 1) }, chunks: [] },
+    { statusCode: 200, headers: {}, chunks: [PNG, Buffer.alloc(MAX_IMAGE_FETCH_BYTES)] },
+  ]) {
+    upstream(t, [reply])
+    await assert.rejects(loadRemoteImage('https://images.example.com/a.png'))
     t.mock.restoreAll()
   }
-  upstream(t, [{ statusCode: 404, headers: {}, chunks: [PNG] }])
-  await assertBlank(await get(signRemoteImage(ORIGIN, 'https://images.example.com/a.png')))
 })
 
-test('with remote images off, the proxy serves nothing', async (t) => {
-  const requests = upstream(t, [{ statusCode: 200, headers: {}, chunks: [PNG] }])
+test('with remote images off, a remote image is refused at publish', (t) => {
   process.env.FX0_REMOTE_IMAGES = '0'
   t.after(() => { delete process.env.FX0_REMOTE_IMAGES })
-  await assertBlank(await get(signRemoteImage(ORIGIN, 'https://images.example.com/a.png')))
-  assert.equal(requests.length, 0)
   assert.equal(validateDesignArtifactHtml(doc('<img src="https://example.com/a.png">')).ok, false)
 })

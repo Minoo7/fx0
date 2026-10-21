@@ -1,58 +1,62 @@
-// @ts-expect-error Node strip-types tests require the source extension.
-import { remoteImagesEnabled, remoteImageUrl } from './remote-image.ts'
-
 export const MAX_DESIGN_ARTIFACT_BYTES = 512 * 1024
+export const MAX_REMOTE_IMAGE_URL_LENGTH = 2048
 
-// `imageSources` are the proxy paths a prepared design may load images from, as
-// absolute source expressions; nothing else on the network is ever allowed.
-export function designArtifactEmbeddedCsp(imageSources: readonly string[] = []): string {
-  return [
-    "default-src 'none'",
-    "script-src 'unsafe-inline'",
-    "style-src 'unsafe-inline'",
-    ['img-src data:', ...imageSources].join(' '),
-    'font-src data:',
-    'media-src data:',
-    "connect-src 'none'",
-    "child-src 'none'",
-    "frame-src 'none'",
-    "worker-src 'none'",
-    "object-src 'none'",
-    "manifest-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-  ].join('; ')
+export function remoteImagesEnabled(): boolean {
+  return process.env.FX0_REMOTE_IMAGES !== '0'
 }
+
+/** A remote image fx0 may fetch: absolute https, no credentials, bounded; else null. */
+export function remoteImageUrl(value: string): string | null {
+  if (!/^https:\/\//i.test(value) || value.length > MAX_REMOTE_IMAGE_URL_LENGTH) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || !url.hostname) return null
+  return url.href.length <= MAX_REMOTE_IMAGE_URL_LENGTH ? url.href : null
+}
+
+export const DESIGN_ARTIFACT_EMBEDDED_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  'img-src data:',
+  'font-src data:',
+  'media-src data:',
+  "connect-src 'none'",
+  "child-src 'none'",
+  "frame-src 'none'",
+  "worker-src 'none'",
+  "object-src 'none'",
+  "manifest-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ')
 
 // The wrapper that frames the design. Its data: frame inherits this policy on top of
 // the embedded one, so anything the design may load must be allowed here too.
-export function designFrameCsp(imageSources: readonly string[] = []): string {
-  return [
-    "default-src 'none'",
-    'frame-src data:',
-    "script-src 'unsafe-inline'",
-    "style-src 'unsafe-inline'",
-    ['img-src data:', ...imageSources].join(' '),
-    'font-src data:',
-    'media-src data:',
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "frame-ancestors 'self'",
-  ].join('; ')
-}
-
-export const DESIGN_ARTIFACT_EMBEDDED_CSP = designArtifactEmbeddedCsp()
-export const DESIGN_FRAME_CSP = designFrameCsp()
+export const DESIGN_FRAME_CSP = [
+  "default-src 'none'",
+  'frame-src data:',
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  'img-src data:',
+  'font-src data:',
+  'media-src data:',
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
+].join('; ')
 
 function designArtifactBootstrap(readyToken?: string): string {
   // The sandbox grants no popups, so a clicked https link asks the app to open it
   // (see app/api/artifact-frame): the app shows the address and opens it only on the
   // user's own click there, instead of the design navigating the preview away.
-  // "painted" waits for load, so images are in, but a slow remote image may delay it
-  // only 1.5 s past parsing: the app swaps revisions on it.
   const heartbeat = readyToken
-    ? `const token=${JSON.stringify(readyToken)};const send=type=>parent.postMessage({type,token},"*");send("heartbeat");setInterval(()=>send("heartbeat"),500);let painted=false;const paint=()=>{if(painted)return;painted=true;requestAnimationFrame(()=>requestAnimationFrame(()=>send("painted")))};addEventListener("load",()=>{send("ready");paint()},{once:true});addEventListener("DOMContentLoaded",()=>setTimeout(paint,1500),{once:true});addEventListener("click",event=>{const link=event.target instanceof Element&&event.target.closest("a[href]");const url=link?link.getAttribute("href")||"":"";if(/^https:/i.test(url)){event.preventDefault();parent.postMessage({type:"open",token,url},"*")}},true);`
+    ? `const token=${JSON.stringify(readyToken)};const send=type=>parent.postMessage({type,token},"*");send("heartbeat");setInterval(()=>send("heartbeat"),500);addEventListener("load",()=>{send("ready");requestAnimationFrame(()=>requestAnimationFrame(()=>send("painted")))},{once:true});addEventListener("click",event=>{const link=event.target instanceof Element&&event.target.closest("a[href]");const url=link?link.getAttribute("href")||"":"";if(/^https:/i.test(url)){event.preventDefault();parent.postMessage({type:"open",token,url},"*")}},true);`
     : ''
   return `<script>(()=>{for(const name of ["RTCPeerConnection","webkitRTCPeerConnection","RTCIceGatherer"]){try{Object.defineProperty(globalThis,name,{value:undefined,writable:false,configurable:false})}catch{}}${heartbeat}})()</script>`
 }
@@ -322,11 +326,12 @@ function validateTag(tag: HtmlTag, remote: boolean): string | null {
 }
 
 // Prepared copies only: every remote image the markup or its CSS names, in the
-// places validation accepts it, becomes `proxy(url)`. The stored design is untouched;
-// text, scripts and anything else that merely contains a URL are never rewritten.
-export function rewriteRemoteImages(html: string, proxy: (url: string) => string): string {
+// places validation accepts it, becomes `embed(url)`, a data: image URL. The stored
+// design is untouched; text, scripts and anything else that merely contains a URL are
+// never rewritten. A srcset keeps only its largest candidate, so each image is fetched once.
+export function rewriteRemoteImages(html: string, embed: (url: string) => string): string {
   const edits: (SourceRange & { text: string })[] = []
-  const attribute = (url: string) => `"${escapeAttribute(safeUrl(proxy(url)))}"`
+  const image = (url: string) => embeddedImage(embed(url))
   for (const tag of parseOpeningTags(html)) {
     for (const [name, range] of tag.valueRanges) {
       const raw = tag.attributes.get(name)!
@@ -334,22 +339,17 @@ export function rewriteRemoteImages(html: string, proxy: (url: string) => string
       if (name === 'src' && tag.name === 'img') url = remoteImageValue(raw)
       else if (name === 'poster' && tag.name === 'video') url = remoteImageValue(raw)
       else if ((name === 'href' || name === 'xlink:href') && tag.name === 'image') url = remoteImageValue(raw)
+      else if (name === 'srcset' && (tag.name === 'img' || tag.name === 'source')) url = largestCandidate(decodeAttribute(raw))
       if (url) {
-        edits.push({ ...range, text: attribute(url) })
-      } else if (name === 'srcset' && (tag.name === 'img' || tag.name === 'source')) {
-        const candidates = remoteSrcset(decodeAttribute(raw))
-        if (candidates) {
-          const value = candidates.map(({ url: candidate, descriptor }) => [safeUrl(proxy(candidate)), descriptor].filter(Boolean).join(' ')).join(', ')
-          edits.push({ ...range, text: `"${escapeAttribute(value)}"` })
-        }
+        edits.push({ ...range, text: `"${image(url)}"` })
       } else if (name === 'style') {
         const quoted = html[range.start] === '"' || html[range.start] === "'"
         const inner = quoted ? { start: range.start + 1, end: range.end - 1 } : range
-        for (const edit of cssUrlEdits(html, inner, true)) edits.push({ ...edit, text: `url(${escapeAttribute(safeUrl(proxy(edit.url)))})` })
+        for (const edit of cssUrlEdits(html, inner, true)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
       }
     }
     if (tag.content) {
-      for (const edit of cssUrlEdits(html, tag.content, false)) edits.push({ ...edit, text: `url(${safeUrl(proxy(edit.url))})` })
+      for (const edit of cssUrlEdits(html, tag.content, false)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
     }
   }
   let result = html
@@ -357,11 +357,19 @@ export function rewriteRemoteImages(html: string, proxy: (url: string) => string
   return result
 }
 
-// A proxy URL goes unquoted into CSS url() and into attributes: only characters that
-// need no escaping in either may remain (encodeURIComponent keeps ! ' ( ) *).
-function safeUrl(url: string): string {
-  return url.replace(/[^A-Za-z0-9\-._~%&=?/:+]/g, (character) =>
-    encodeURIComponent(character).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`))
+// The embedded value lands unquoted in CSS url() and quoted in attributes, so it must
+// be a base64 data: image, whose characters need no escaping in either.
+const EMBEDDED_IMAGE = /^data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/
+export const BLANK_IMAGE = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+function embeddedImage(value: string): string {
+  return EMBEDDED_IMAGE.test(value) ? value : BLANK_IMAGE
+}
+
+function largestCandidate(value: string): string | null {
+  const candidates = remoteSrcset(value)
+  if (!candidates) return null
+  const size = ({ descriptor }: SrcsetCandidate) => Number.parseFloat(descriptor) || 1
+  return candidates.reduce((best, candidate) => (size(candidate) > size(best) ? candidate : best)).url
 }
 
 // In a style attribute the browser decodes character references first, so quotes may
