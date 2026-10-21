@@ -5,18 +5,42 @@ import { registerHooks } from 'node:module'
 // design-assets keeps its manifest in the chat journal; here that is an in-memory map,
 // and the Blob store is a fake passed in, so no network or Redis is involved.
 const manifests = new Map()
-globalThis.__assetManifests = manifests
+const jobs = new Map()
+const completed = new Set()
+const calls = []
+const journal = { manifests, jobs, completed, calls }
+globalThis.__assetJournal = journal
+test.beforeEach(() => {
+  manifests.clear(); jobs.clear(); completed.clear(); calls.length = 0
+  journal.reserve = async (...args) => { calls.push(['reserve', ...args]); return 'ok' }
+  journal.record = async (id, assets) => {
+    const map = manifests.get(id) ?? new Map()
+    for (const a of assets) map.set(a.handle, { mimeType: a.mimeType, bytes: a.bytes })
+    manifests.set(id, map)
+  }
+  journal.queue = async (job) => { if (!completed.has(JSON.stringify(job))) jobs.set(JSON.stringify(job), job) }
+})
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === './journal' && context.parentURL?.endsWith('/lib/design-assets.ts')) {
       return { url: `data:text/javascript,${encodeURIComponent(`
-        const m = globalThis.__assetManifests
-        export async function recordDesignAssets(id, assets) { const map = m.get(id) ?? new Map(); for (const a of assets) map.set(a.handle, { mimeType: a.mimeType, bytes: a.bytes }); m.set(id, map) }
-        export async function readDesignAssets(id, handles) { const map = m.get(id) ?? new Map(); return new Map([...map].filter(([h]) => !handles || handles.includes(h))) }
+        const j = globalThis.__assetJournal
+        export const recordDesignAssets = (...args) => j.record(...args)
+        export async function readDesignAssets(id, handles) { const map = j.manifests.get(id) ?? new Map(); return new Map([...map].filter(([h]) => !handles || handles.includes(h))) }
         export const MAX_CHAT_ASSETS = 50
         export const MAX_DAILY_ASSETS = 100
-        export async function reserveDesignAssets() { return 'ok' }
-        export async function releaseDesignAssets() {}
+        export const reserveDesignAssets = (...args) => j.reserve(...args)
+        export async function releaseDesignAssets(...args) { j.calls.push(['release', ...args]) }
+        export const queueDesignAssetCleanup = (...args) => j.queue(...args)
+        export async function pendingDesignAssetCleanups() { return [...j.jobs.values()] }
+        export async function forgetDesignAssets(id, handles) { for (const h of handles) j.manifests.get(id)?.delete(h) }
+        export async function finishDesignAssetCleanup(job) {
+          if (j.completed.has(JSON.stringify(job))) return
+          j.completed.add(JSON.stringify(job))
+          j.jobs.delete(JSON.stringify(job))
+          await forgetDesignAssets(job.sessionId, job.handles)
+          await releaseDesignAssets(job.sessionId, job.userId, job.handles.length, job.reservedAt)
+        }
       `)}`, shortCircuit: true }
     }
     return next(specifier, context)
@@ -24,7 +48,7 @@ registerHooks({
 })
 
 process.env.SESSION_SECRET ??= 'deterministic-design-assets-test-secret-32+'
-const { storeDesignAssets, readDesignAsset, deleteDesignAssets, DesignAssetLimitError } = await import('../lib/design-assets.ts')
+const { storeDesignAssets, readDesignAsset, deleteDesignAssets, retryDesignAssetCleanup, DesignAssetLimitError } = await import('../lib/design-assets.ts')
 const { validateDesignArtifactHtml, rewriteRemoteImages, BLANK_IMAGE } = await import('../lib/design-artifact.ts')
 const { markRemoteImages } = await import('../lib/remote-image.ts')
 const { artifactImageSrc, verifyArtifactImage } = await import('../lib/artifact-image.ts')
@@ -32,7 +56,6 @@ const { artifactImageSrc, verifyArtifactImage } = await import('../lib/artifact-
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 const CHAT = '11111111-1111-4111-8111-111111111111'
 const USER = 'user_a'
-const OPEN = { reserve: async () => 'ok', release: async () => {} }
 const HANDLE = 'AbCdEfGhIjKlMnOpQrStUvWx'
 const doc = (body, head = '') => `<!doctype html><html><head>${head}</head><body>${body}</body></html>`
 
@@ -66,7 +89,7 @@ test('a message\'s images are stored privately and recorded for the chat, all or
   manifests.clear()
   const store = fakeStore()
   const images = [{ type: 'image', data: PNG, mimeType: 'image/png' }, { type: 'image', data: PNG, mimeType: 'image/png' }]
-  const handles = await storeDesignAssets(CHAT, USER, images, store, OPEN)
+  const handles = await storeDesignAssets(CHAT, USER, images, store)
   assert.equal(handles.length, 2)
   for (const handle of handles) {
     assert.match(handle, /^[A-Za-z0-9_-]{24}$/)
@@ -76,7 +99,7 @@ test('a message\'s images are stored privately and recorded for the chat, all or
 
   manifests.clear()
   const failing = fakeStore({ failOn: 1 })
-  await assert.rejects(storeDesignAssets(CHAT, USER, images, failing, OPEN), /Unable to store/)
+  await assert.rejects(storeDesignAssets(CHAT, USER, images, failing), /Unable to store/)
   assert.equal(failing.files.size, 0, 'the image that was stored is removed again')
   assert.equal(manifests.size, 0, 'nothing is recorded')
 })
@@ -84,27 +107,25 @@ test('a message\'s images are stored privately and recorded for the chat, all or
 test('the chat and daily caps are taken before anything is stored, and given back if storing fails', async () => {
   manifests.clear()
   const image = { type: 'image', data: PNG, mimeType: 'image/png' }
-  const calls = []
-  const quota = (answer) => ({
-    reserve: async (...args) => { calls.push(['reserve', ...args]); return answer },
-    release: async (...args) => { calls.push(['release', ...args]) },
-  })
   for (const [limit, message] of [['chat', /already has its 50 attached images/], ['daily', /up to 100 images a day/]]) {
     const store = fakeStore()
     calls.length = 0
-    await assert.rejects(storeDesignAssets(CHAT, USER, [image, image], store, quota(limit)), (error) => error instanceof DesignAssetLimitError && message.test(error.message))
+    journal.reserve = async (...args) => { calls.push(['reserve', ...args]); return limit }
+    await assert.rejects(storeDesignAssets(CHAT, USER, [image, image], store), (error) => error instanceof DesignAssetLimitError && message.test(error.message))
     assert.equal(store.files.size, 0, 'nothing stored past a cap')
-    assert.deepEqual(calls, [['reserve', CHAT, USER, 2]])
+    assert.deepEqual(calls.map((call) => call.slice(0, 4)), [['reserve', CHAT, USER, 2]])
   }
   calls.length = 0
-  await assert.rejects(storeDesignAssets(CHAT, USER, [image, image], fakeStore({ failOn: 0 }), quota('ok')), /Unable to store/)
-  assert.deepEqual(calls, [['reserve', CHAT, USER, 2], ['release', CHAT, USER, 2]])
+  journal.reserve = async (...args) => { calls.push(['reserve', ...args]); return 'ok' }
+  await assert.rejects(storeDesignAssets(CHAT, USER, [image, image], fakeStore({ failOn: 0 })), /Unable to store/)
+  assert.deepEqual(calls.map((call) => call.slice(0, 4)), [['reserve', CHAT, USER, 2], ['release', CHAT, USER, 2]])
+  assert.equal(calls[0][4], calls[1][4], 'the refund uses the reservation day')
 })
 
 test('an image is read only for the chat that received it', async () => {
   manifests.clear()
   const store = fakeStore()
-  const [handle] = await storeDesignAssets(CHAT, USER, [{ type: 'image', data: PNG, mimeType: 'image/png' }], store, OPEN)
+  const [handle] = await storeDesignAssets(CHAT, USER, [{ type: 'image', data: PNG, mimeType: 'image/png' }], store)
   const image = await readDesignAsset(CHAT, handle, store)
   assert.deepEqual({ mimeType: image.mimeType, bytes: image.bytes.toString('base64') }, { mimeType: 'image/png', bytes: PNG })
   assert.equal(await readDesignAsset('22222222-2222-4222-8222-222222222222', handle, store), null)
@@ -115,10 +136,97 @@ test('deleting a chat removes all its files, page by page, and no other chat\'s'
   manifests.clear()
   const store = fakeStore()
   const image = { type: 'image', data: PNG, mimeType: 'image/png' }
-  await storeDesignAssets(CHAT, USER, [image, image, image, image, image], store, OPEN)
-  const [other] = await storeDesignAssets('33333333-3333-4333-8333-333333333333', USER, [image], store, OPEN)
+  await storeDesignAssets(CHAT, USER, [image, image, image, image, image], store)
+  const [other] = await storeDesignAssets('33333333-3333-4333-8333-333333333333', USER, [image], store)
   await deleteDesignAssets(CHAT, store)
   assert.deepEqual([...store.files.keys()], [`chats/33333333-3333-4333-8333-333333333333/${other}`])
+})
+
+test('a failed manifest write rolls back every attempted file and refunds only after removal', async () => {
+  const store = fakeStore()
+  const record = journal.record
+  journal.record = async (...args) => { await record(...args); throw new Error('manifest response lost') }
+  const image = { type: 'image', data: PNG, mimeType: 'image/png' }
+  await assert.rejects(storeDesignAssets(CHAT, USER, [image, image], store), /manifest response lost/)
+  assert.equal(store.files.size, 0)
+  assert.equal(manifests.get(CHAT).size, 0, 'an ambiguously committed manifest is removed too')
+  assert.equal(jobs.size, 0)
+  assert.equal(calls.filter(([name]) => name === 'release').length, 1)
+})
+
+test('a put with a lost response is removed along with its successful siblings', async () => {
+  const store = fakeStore()
+  const put = store.put
+  store.put = async (...args) => { await put(...args); throw new Error('put response lost') }
+  const image = { type: 'image', data: PNG, mimeType: 'image/png' }
+  await assert.rejects(storeDesignAssets(CHAT, USER, [image, image], store), /Unable to store/)
+  assert.equal(store.files.size, 0)
+  assert.equal(jobs.size, 0)
+})
+
+test('a refused late manifest commit removes uploads that completed after chat deletion', async () => {
+  const store = fakeStore()
+  let finishUpload
+  const wait = new Promise((resolve) => { finishUpload = resolve })
+  let uploadStarted
+  const started = new Promise((resolve) => { uploadStarted = resolve })
+  const put = store.put
+  store.put = async (...args) => { uploadStarted(); await wait; return put(...args) }
+  let deleted = false
+  journal.record = async () => { assert.equal(deleted, true); throw new Error('chat deleted') }
+  const pending = storeDesignAssets(CHAT, USER, [{ type: 'image', data: PNG, mimeType: 'image/png' }], store)
+  const refused = assert.rejects(pending, /chat deleted/)
+  await started
+  deleted = true
+  await deleteDesignAssets(CHAT, store)
+  finishUpload()
+  await refused
+  assert.equal(store.files.size, 0)
+  assert.equal(manifests.size, 0)
+})
+
+test('failed physical rollback keeps a durable retry and its quota until cleanup succeeds once', async (t) => {
+  t.mock.method(console, 'error', () => {})
+  const store = fakeStore()
+  journal.record = async () => { throw new Error('manifest unavailable') }
+  const del = store.del
+  store.del = async () => { throw new Error('blob deletion unavailable') }
+  const image = { type: 'image', data: PNG, mimeType: 'image/png' }
+  await assert.rejects(storeDesignAssets(CHAT, USER, [image], store), /manifest unavailable/)
+  assert.equal(store.files.size, 1)
+  assert.equal(jobs.size, 1)
+  assert.equal(calls.some(([name]) => name === 'release'), false)
+  await retryDesignAssetCleanup(store)
+  assert.equal(jobs.size, 1, 'an unsuccessful retry does not lose its durable record')
+  store.del = del
+  await Promise.all([retryDesignAssetCleanup(store), retryDesignAssetCleanup(store)])
+  assert.equal(store.files.size, 0)
+  assert.equal(jobs.size, 0)
+  assert.equal(calls.filter(([name]) => name === 'release').length, 1)
+})
+
+test('a Redis outage cannot prevent immediate removal of files after a failed manifest write', async (t) => {
+  t.mock.method(console, 'error', () => {})
+  const store = fakeStore()
+  journal.record = async () => { throw new Error('Redis unavailable') }
+  journal.queue = async () => { throw new Error('Redis unavailable') }
+  await assert.rejects(storeDesignAssets(CHAT, USER, [{ type: 'image', data: PNG, mimeType: 'image/png' }], store), /Redis unavailable/)
+  assert.equal(store.files.size, 0)
+  assert.equal(calls.filter(([name]) => name === 'release').length, 1)
+})
+
+test('a lost cleanup enqueue response cannot refund a rollback twice', async (t) => {
+  t.mock.method(console, 'error', () => {})
+  const store = fakeStore()
+  journal.record = async () => { throw new Error('manifest unavailable') }
+  const queue = journal.queue
+  journal.queue = async (job) => { await queue(job); throw new Error('enqueue response lost') }
+  await assert.rejects(storeDesignAssets(CHAT, USER, [{ type: 'image', data: PNG, mimeType: 'image/png' }], store), /manifest unavailable/)
+  journal.queue = queue
+  await retryDesignAssetCleanup(store)
+  assert.equal(store.files.size, 0)
+  assert.equal(jobs.size, 0)
+  assert.equal(calls.filter(([name]) => name === 'release').length, 1)
 })
 
 test('a design may name an attached image wherever it may name an image, even with remote images off', () => {

@@ -9,7 +9,9 @@ const journalNames = [
   'answerActiveQuestion', 'appendEvent', 'bindLibfxSession', 'chatOfLibfxSession', 'claimSessionCleanup',
   'clearActiveQuestion', 'currentSeq', 'emitLive', 'finishSessionCleanup', 'finishTurnWork', 'getActiveQuestion',
   'getActiveTurn', 'nextQuestionId', 'projectEvents', 'projectedCursor', 'publishDesignArtifact', 'readDesignArtifact',
-  'readDesignAssets', 'readDesignMd', 'readEvents', 'recordDesignAssets', 'releaseDesignAssets', 'reserveDesignAssets', 'readSession', 'readSessionView', 'readTurnWork', 'releaseSessionCleanup', 'renewSessionCleanup',
+  'readDesignAssets', 'readDesignMd', 'readEvents', 'recordDesignAssets', 'releaseDesignAssets', 'reserveDesignAssets',
+  'finishDesignAssetCleanup', 'pendingDesignAssetCleanups', 'queueDesignAssetCleanup',
+  'readSession', 'readSessionView', 'readTurnWork', 'releaseSessionCleanup', 'renewSessionCleanup',
   'setActiveQuestion', 'submitPrompt', 'takeAnswer', 'updateSession',
 ]
 const dataUrl = (source) => `data:text/javascript,${encodeURIComponent(source)}`

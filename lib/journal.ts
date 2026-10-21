@@ -587,6 +587,7 @@ export const MAX_CHAT_ASSETS = 50
 export const MAX_DAILY_ASSETS = 100
 
 const RESERVE_ASSETS = `
+if redis.call('EXISTS', KEYS[3]) == 1 then return 'deleted' end
 local count = tonumber(ARGV[1])
 local chat = tonumber(redis.call('GET', KEYS[1]) or '0')
 local daily = tonumber(redis.call('GET', KEYS[2]) or '0')
@@ -609,17 +610,79 @@ return 1
 const dailyAssetKey = (userId: string, now: number) => prefixed(`user:${userId}:assets:${new Date(now).toISOString().slice(0, 10)}`)
 
 export async function reserveDesignAssets(sessionId: string, userId: string, count: number, now = Date.now()): Promise<'ok' | 'chat' | 'daily'> {
-  return redis().eval<string[], 'ok' | 'chat' | 'daily'>(RESERVE_ASSETS,
-    [key(sessionId, 'asset-count'), dailyAssetKey(userId, now)], [String(count), String(MAX_CHAT_ASSETS), String(MAX_DAILY_ASSETS)])
+  const result = await redis().eval<string[], 'ok' | 'chat' | 'daily' | 'deleted'>(RESERVE_ASSETS,
+    [key(sessionId, 'asset-count'), dailyAssetKey(userId, now), key(sessionId, 'deleting')], [String(count), String(MAX_CHAT_ASSETS), String(MAX_DAILY_ASSETS)])
+  if (result === 'deleted') throw new SessionCleanupError()
+  return result
 }
 
 export async function releaseDesignAssets(sessionId: string, userId: string, count: number, now = Date.now()): Promise<void> {
   await redis().eval<string[], number>(RELEASE_ASSETS, [key(sessionId, 'asset-count'), dailyAssetKey(userId, now)], [String(count)])
 }
 
+const RECORD_ASSETS = `
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+for handle, asset in pairs(cjson.decode(ARGV[1])) do redis.call('HSET', KEYS[1], handle, cjson.encode(asset)) end
+return 1
+`
+
 export async function recordDesignAssets(sessionId: string, assets: { handle: string; mimeType: string; bytes: number }[]): Promise<void> {
   if (!assets.length) return
-  await redis().hset(key(sessionId, 'assets'), Object.fromEntries(assets.map(({ handle, mimeType, bytes }) => [handle, JSON.stringify({ mimeType, bytes })])))
+  const recorded = await redis().eval<unknown[], number>(RECORD_ASSETS,
+    [key(sessionId, 'assets'), key(sessionId, 'deleting')],
+    [JSON.stringify(Object.fromEntries(assets.map(({ handle, mimeType, bytes }) => [handle, { mimeType, bytes }])))])
+  if (recorded !== 1) throw new SessionCleanupError()
+}
+
+// Failed uploads retain their quota until their files have actually been removed.
+// This outbox survives request failures and chat deletion; later asset writes retry
+// a bounded batch. Completion removes the manifest entries and refunds exactly once.
+export interface DesignAssetCleanup { sessionId: string; userId: string; handles: string[]; reservedAt: number }
+
+const assetCleanupKey = () => prefixed('asset-cleanup')
+const assetCleanupReceipt = (cleanup: DesignAssetCleanup) => prefixed(`asset-cleanup-done:${createHash('sha256').update(JSON.stringify(cleanup)).digest('hex')}`)
+
+const QUEUE_ASSET_CLEANUP = `
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+return 1
+`
+
+export async function queueDesignAssetCleanup(cleanup: DesignAssetCleanup): Promise<void> {
+  await redis().eval<unknown[], number>(QUEUE_ASSET_CLEANUP,
+    [assetCleanupKey(), assetCleanupReceipt(cleanup)], [String(Date.now()), JSON.stringify(cleanup)])
+}
+
+const PENDING_ASSET_CLEANUPS = `
+local pending = redis.call('ZRANGE', KEYS[1], 0, 9)
+for _, job in ipairs(pending) do redis.call('ZADD', KEYS[1], ARGV[1], job) end
+return pending
+`
+
+export async function pendingDesignAssetCleanups(): Promise<DesignAssetCleanup[]> {
+  // Rotate attempted jobs behind newer ones without recreating a completed job
+  // after an ambiguous completion response. Overlapping workers are safe below.
+  return redis().eval<unknown[], DesignAssetCleanup[]>(PENDING_ASSET_CLEANUPS, [assetCleanupKey()], [String(Date.now())])
+}
+
+const FINISH_ASSET_CLEANUP = `
+if not redis.call('SET', KEYS[5], '1', 'NX', 'EX', 172800) then return 0 end
+redis.call('ZREM', KEYS[4], ARGV[1])
+local handles = cjson.decode(ARGV[2])
+for _, handle in ipairs(handles) do redis.call('HDEL', KEYS[3], handle) end
+local count = #handles
+for index = 1, 2 do
+  if tonumber(redis.call('GET', KEYS[index]) or '0') >= count then redis.call('DECRBY', KEYS[index], count) end
+end
+return 1
+`
+
+export async function finishDesignAssetCleanup(cleanup: DesignAssetCleanup): Promise<void> {
+  // The receipt outlives any request retry. Even an enqueue whose response was
+  // lost cannot recreate this job or refund a completed rollback a second time.
+  await redis().eval<unknown[], number>(FINISH_ASSET_CLEANUP,
+    [key(cleanup.sessionId, 'asset-count'), dailyAssetKey(cleanup.userId, cleanup.reservedAt), key(cleanup.sessionId, 'assets'), assetCleanupKey(), assetCleanupReceipt(cleanup)],
+    [JSON.stringify(cleanup), JSON.stringify(cleanup.handles)])
 }
 
 export async function readDesignAssets(sessionId: string, handles?: string[]): Promise<Map<string, DesignAsset>> {

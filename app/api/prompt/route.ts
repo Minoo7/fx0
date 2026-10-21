@@ -11,7 +11,7 @@ import { trialEnabled, trialIpHash, trialStore, type TrialCredential, type Trial
 import { TRIAL_MODEL, usesFreePrompts } from '../../../lib/trial-policy'
 import { DEFAULT_MODEL, log } from '../../../lib/session'
 import { validatePromptImages, validatePromptPreviews } from '../../../lib/prompt-images'
-import { DesignAssetLimitError, storeDesignAssets } from '../../../lib/design-assets'
+import { DesignAssetLimitError, retryDesignAssetCleanup, storeDesignAssets } from '../../../lib/design-assets'
 import { PROMPT_TEXT_LIMIT_ERROR, PROMPT_TEXT_MAX_BYTES, promptTextBytes } from '../../../lib/prompt-limits'
 
 export const maxDuration = 800
@@ -110,6 +110,7 @@ export const POST = withPromptRoute(async (request, context) => {
     // so nothing is stored for a prompt that could not run.
     let assets: string[] = []
     if (images) {
+      after(() => retryDesignAssetCleanup().catch(() => console.error('[fx0] asset cleanup retry unavailable')))
       assertPromptFunding(activated.host, funding, 'kind' in session ? undefined : session)
       assets = await storeDesignAssets(activated.id, user.id, images)
     }

@@ -1,6 +1,10 @@
 import { randomBytes } from 'node:crypto'
 import { del, get, list, put } from '@vercel/blob'
-import { MAX_CHAT_ASSETS, MAX_DAILY_ASSETS, readDesignAssets, recordDesignAssets, releaseDesignAssets, reserveDesignAssets } from './journal'
+import {
+  MAX_CHAT_ASSETS, MAX_DAILY_ASSETS, finishDesignAssetCleanup, pendingDesignAssetCleanups,
+  queueDesignAssetCleanup, readDesignAssets, recordDesignAssets, reserveDesignAssets,
+  type DesignAssetCleanup,
+} from './journal'
 import type { PromptImage } from './prompt-images'
 
 // Images a message attached, kept in fx0's private Blob store so a design can show them
@@ -15,13 +19,6 @@ export interface DesignAssetStore {
 }
 
 const BLOB: DesignAssetStore = { put, get, del, list }
-
-export interface DesignAssetQuota {
-  reserve: typeof reserveDesignAssets
-  release: typeof releaseDesignAssets
-}
-
-const QUOTA: DesignAssetQuota = { reserve: reserveDesignAssets, release: releaseDesignAssets }
 
 /** A message that would pass the per-chat or per-day image cap. Nothing was stored. */
 export class DesignAssetLimitError extends Error {
@@ -38,33 +35,55 @@ const pathname = (sessionId: string, handle: string) => `chats/${sessionId}/${ha
  * Stores a message's images and records them for the chat, all or none, within the
  * chat's and the user's caps. Returns their handles in order.
  */
-export async function storeDesignAssets(sessionId: string, userId: string, images: PromptImage[], store = BLOB, quota = QUOTA): Promise<string[]> {
+export async function storeDesignAssets(sessionId: string, userId: string, images: PromptImage[], store = BLOB): Promise<string[]> {
   if (!images.length) return []
-  const reserved = await quota.reserve(sessionId, userId, images.length)
+  const reservedAt = Date.now()
+  const reserved = await reserveDesignAssets(sessionId, userId, images.length, reservedAt)
   if (reserved !== 'ok') throw new DesignAssetLimitError(reserved)
-  try {
-    return await storeReserved(sessionId, images, store)
-  } catch (error) {
-    await quota.release(sessionId, userId, images.length).catch(() => {})
-    throw error
-  }
-}
-
-async function storeReserved(sessionId: string, images: PromptImage[], store: DesignAssetStore): Promise<string[]> {
   const assets = images.map((image) => ({
     handle: randomBytes(18).toString('base64url'),
     mimeType: image.mimeType,
     bytes: Buffer.from(image.data, 'base64'),
   }))
-  const results = await Promise.allSettled(assets.map(({ handle, mimeType, bytes }) =>
-    store.put(pathname(sessionId, handle), bytes, { access: 'private', contentType: mimeType, addRandomSuffix: false })))
-  if (results.some((result) => result.status === 'rejected')) {
-    const stored = assets.filter((_, index) => results[index].status === 'fulfilled').map(({ handle }) => pathname(sessionId, handle))
-    if (stored.length) await store.del(stored).catch(() => {})
-    throw new Error('Unable to store the attached images')
+  const handles = assets.map(({ handle }) => handle)
+  try {
+    // Wait for every put before rolling back: a sibling can still be in flight when
+    // another fails. Delete every attempted path, including an ambiguous timeout.
+    const results = await Promise.allSettled(assets.map(({ handle, mimeType, bytes }) =>
+      store.put(pathname(sessionId, handle), bytes, { access: 'private', contentType: mimeType, addRandomSuffix: false })))
+    if (results.some((result) => result.status === 'rejected')) throw new Error('Unable to store the attached images')
+    await recordDesignAssets(sessionId, assets.map(({ handle, mimeType, bytes }) => ({ handle, mimeType, bytes: bytes.length })))
+    return handles
+  } catch (error) {
+    const cleanup = { sessionId, userId, handles, reservedAt }
+    try {
+      await queueDesignAssetCleanup(cleanup)
+    } catch {
+      console.error('[fx0] asset cleanup persistence failed', { sessionId })
+    }
+    try {
+      await store.del(handles.map((handle) => pathname(sessionId, handle)))
+      // Complete atomically even if the enqueue response was lost. The receipt
+      // prevents a delayed enqueue or another worker from refunding this twice.
+      await finishDesignAssetCleanup(cleanup)
+    } catch {
+      console.error('[fx0] asset cleanup pending', { sessionId })
+    }
+    throw error
   }
-  await recordDesignAssets(sessionId, assets.map(({ handle, mimeType, bytes }) => ({ handle, mimeType, bytes: bytes.length })))
-  return assets.map(({ handle }) => handle)
+}
+
+/** Retry failed rollbacks without losing their records or refunding quota twice. */
+export async function retryDesignAssetCleanup(store = BLOB): Promise<void> {
+  const pending = await pendingDesignAssetCleanups()
+  await Promise.all(pending.map(async (cleanup: DesignAssetCleanup) => {
+    try {
+      await store.del(cleanup.handles.map((handle) => pathname(cleanup.sessionId, handle)))
+      await finishDesignAssetCleanup(cleanup)
+    } catch {
+      console.error('[fx0] asset cleanup pending', { sessionId: cleanup.sessionId })
+    }
+  }))
 }
 
 /** One of the chat's images, or null when the chat never received that handle. */
