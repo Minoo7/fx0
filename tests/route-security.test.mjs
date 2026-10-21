@@ -470,7 +470,12 @@ test('the artifact preview permits iframe origins but preserves opaque credentia
   assert.match(html, /navigator\.userActivation\?\.isActive!==false/)
   assert.doesNotMatch(html, /allow-popups/)
   assert.match(html, /setAttribute\('credentialless',''\)/)
-  assert.match(html, /data:text\/html;base64/)
+  // A blob: frame, not a data: URL, which browsers refuse past 2 MiB. The design string
+  // cannot close the wrapper's script: its "<" are escaped, so only one </script> remains.
+  assert.match(html, /URL\.createObjectURL\(new Blob\(\[/)
+  assert.doesNotMatch(html, /data:text\/html/)
+  assert.equal(html.split('</script>').length - 1, 1)
+  assert.match(frame.headers.get('content-security-policy'), /frame-src blob:;/)
   assert.doesNotMatch(html, /allow-same-origin|user-token|secret-refresh/)
   assert.match(frame.headers.get('content-security-policy'), /frame-ancestors 'self'/)
 })
