@@ -1,9 +1,9 @@
-import type { FxAgent } from 'libfx'
+import type { FxAgent, FxSession } from 'libfx'
 import { createTools, type AskQuestion, type ToolHost } from './tools'
 import { assertGenerationCredential } from './gateway-session'
 import { remoteImagesEnabled } from './design-artifact'
 import { prefetchRemoteImages } from './remote-image-cache'
-import { deleteDesignAssets } from './design-assets'
+import { deleteDesignAssets, type PendingDesignAssets } from './design-assets'
 import { chatSession, durableAgent, runSubagent, type ChatRuntime } from './libfx-agent'
 import { project } from './projector'
 import {
@@ -237,7 +237,7 @@ export async function submitPrompt(
   previews?: string[],
   funding?: TrialCredential,
   submitter?: SessionData,
-  assets: string[] = [],
+  assets?: PendingDesignAssets,
 ): Promise<{ id: number; seq: number; trialChat: boolean }> {
   // A turn needs at least 15 minutes left on the credential it bills; libfx runs
   // it, including a crash recovery, within that.
@@ -249,6 +249,7 @@ export async function submitPrompt(
   stages.mark('journal')
   log(host.id, 'prompt:submitted', { id: submitted.id, clientId, imageCount: images?.length ?? 0, idle: submitted.idle })
   const id = submitted.id
+  let accepted: FxSession | null = null
   try {
     // Pinned before libfx sees the message: whether it starts a turn or joins
     // the running one, no turn can run without its funding record.
@@ -260,8 +261,8 @@ export async function submitPrompt(
     const { session } = await chatSession(agent(), host, stored?.libfxSessionId ?? null, agentInstructions(host), id, !!funding)
     stages.mark('bind')
     // Each attached image, in order, as the design can name it.
-    const placeable = assets.length
-      ? `\n\n[Attached images the design can show: ${assets.map((handle, index) => `Image #${index + 1} = fx0-asset:${handle}`).join(', ')}]`
+    const placeable = assets?.handles.length
+      ? `\n\n[Attached images the design can show: ${assets.handles.map((handle, index) => `Image #${index + 1} = fx0-asset:${handle}`).join(', ')}]`
       : ''
     const message = `[${author}] ${text}${placeable}`
     const input = images?.length ? [{ type: 'text' as const, text: message }, ...images] : message
@@ -279,10 +280,20 @@ export async function submitPrompt(
       await session.steer(input, { messageId: `m${id}` })
     }
     stages.mark('accepted')
+    // The images uploaded while libfx admitted the prompt; a design can name them only
+    // once they are stored, which comes long before the model publishes one.
+    if (assets) {
+      accepted = session
+      await assets.stored
+      stages.mark('assets')
+    }
     log(host.id, 'prompt:stages', { id, path: prompted ? 'prompt' : 'steer', ...stages.done() })
   } catch (error) {
     log(host.id, 'prompt:rejected', { id, error: errorText(error) })
-    await emit(host, { type: 'error', id, turnId: id, text: `prompt rejected: ${errorText(error)}` })
+    // A turn already admitted must not go on naming images that were never stored.
+    if (accepted) await accepted.cancel().catch(() => {})
+    const text = accepted ? 'The attached images could not be stored. Send the message again.' : `prompt rejected: ${errorText(error)}`
+    await emit(host, { type: 'error', id, turnId: id, text })
   }
   return { id, seq: submitted.event.seq ?? 0, trialChat: submitted.trialChat }
 }

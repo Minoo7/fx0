@@ -31,12 +31,21 @@ export class DesignAssetLimitError extends Error {
 
 const pathname = (sessionId: string, handle: string) => `chats/${sessionId}/${handle}`
 
+export interface PendingDesignAssets {
+  /** Usable at once, in order: what the model is told. */
+  handles: string[]
+  /** Settles when the files and the chat's manifest are in place; rejects after cleaning up. */
+  stored: Promise<void>
+}
+
 /**
- * Stores a message's images and records them for the chat, all or none, within the
- * chat's and the user's caps. Returns their handles in order.
+ * Takes the chat's and the user's caps for a message's images and starts storing them,
+ * so the prompt can go to libfx while the files upload. The handles are final now; a
+ * design can name them once `stored` settles. Throws DesignAssetLimitError before
+ * anything is stored when a cap would be passed.
  */
-export async function storeDesignAssets(sessionId: string, userId: string, images: PromptImage[], store = BLOB): Promise<string[]> {
-  if (!images.length) return []
+export async function startDesignAssets(sessionId: string, userId: string, images: PromptImage[], store = BLOB): Promise<PendingDesignAssets> {
+  if (!images.length) return { handles: [], stored: Promise.resolve() }
   const reservedAt = Date.now()
   const reserved = await reserveDesignAssets(sessionId, userId, images.length, reservedAt)
   if (reserved !== 'ok') throw new DesignAssetLimitError(reserved)
@@ -46,31 +55,42 @@ export async function storeDesignAssets(sessionId: string, userId: string, image
     bytes: Buffer.from(image.data, 'base64'),
   }))
   const handles = assets.map(({ handle }) => handle)
-  try {
-    // Wait for every put before rolling back: a sibling can still be in flight when
-    // another fails. Delete every attempted path, including an ambiguous timeout.
-    const results = await Promise.allSettled(assets.map(({ handle, mimeType, bytes }) =>
-      store.put(pathname(sessionId, handle), bytes, { access: 'private', contentType: mimeType, addRandomSuffix: false })))
-    if (results.some((result) => result.status === 'rejected')) throw new Error('Unable to store the attached images')
-    await recordDesignAssets(sessionId, assets.map(({ handle, mimeType, bytes }) => ({ handle, mimeType, bytes: bytes.length })))
-    return handles
-  } catch (error) {
-    const cleanup = { sessionId, userId, handles, reservedAt }
+  const stored = (async () => {
     try {
-      await queueDesignAssetCleanup(cleanup)
-    } catch {
-      console.error('[fx0] asset cleanup persistence failed', { sessionId })
+      // Wait for every put before rolling back: a sibling can still be in flight when
+      // another fails. Delete every attempted path, including an ambiguous timeout.
+      const results = await Promise.allSettled(assets.map(({ handle, mimeType, bytes }) =>
+        store.put(pathname(sessionId, handle), bytes, { access: 'private', contentType: mimeType, addRandomSuffix: false })))
+      if (results.some((result) => result.status === 'rejected')) throw new Error('Unable to store the attached images')
+      await recordDesignAssets(sessionId, assets.map(({ handle, mimeType, bytes }) => ({ handle, mimeType, bytes: bytes.length })))
+    } catch (error) {
+      const cleanup = { sessionId, userId, handles, reservedAt }
+      try {
+        await queueDesignAssetCleanup(cleanup)
+      } catch {
+        console.error('[fx0] asset cleanup persistence failed', { sessionId })
+      }
+      try {
+        await store.del(handles.map((handle) => pathname(sessionId, handle)))
+        // Complete atomically even if the enqueue response was lost. The receipt
+        // prevents a delayed enqueue or another worker from refunding this twice.
+        await finishDesignAssetCleanup(cleanup)
+      } catch {
+        console.error('[fx0] asset cleanup pending', { sessionId })
+      }
+      throw error
     }
-    try {
-      await store.del(handles.map((handle) => pathname(sessionId, handle)))
-      // Complete atomically even if the enqueue response was lost. The receipt
-      // prevents a delayed enqueue or another worker from refunding this twice.
-      await finishDesignAssetCleanup(cleanup)
-    } catch {
-      console.error('[fx0] asset cleanup pending', { sessionId })
-    }
-    throw error
-  }
+  })()
+  // The caller awaits it; this only keeps an early failure from being unhandled.
+  stored.catch(() => {})
+  return { handles, stored }
+}
+
+/** Stores a message's images, all or none, within the caps. Returns their handles in order. */
+export async function storeDesignAssets(sessionId: string, userId: string, images: PromptImage[], store = BLOB): Promise<string[]> {
+  const pending = await startDesignAssets(sessionId, userId, images, store)
+  await pending.stored
+  return pending.handles
 }
 
 /** Retry failed rollbacks without losing their records or refunding quota twice. */
