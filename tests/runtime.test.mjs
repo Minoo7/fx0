@@ -9,13 +9,15 @@ const journalNames = [
   'answerActiveQuestion', 'appendEvent', 'bindLibfxSession', 'chatOfLibfxSession', 'claimSessionCleanup',
   'clearActiveQuestion', 'currentSeq', 'emitLive', 'finishSessionCleanup', 'finishTurnWork', 'getActiveQuestion',
   'getActiveTurn', 'nextQuestionId', 'projectEvents', 'projectedCursor', 'publishDesignArtifact', 'readDesignArtifact',
-  'readDesignMd', 'readEvents', 'readSession', 'readSessionView', 'readTurnWork', 'releaseSessionCleanup', 'renewSessionCleanup',
+  'readDesignAssets', 'readDesignMd', 'readEvents', 'recordDesignAssets', 'releaseDesignAssets', 'reserveDesignAssets',
+  'finishDesignAssetCleanup', 'pendingDesignAssetCleanups', 'queueDesignAssetCleanup',
+  'readSession', 'readSessionView', 'readTurnWork', 'releaseSessionCleanup', 'renewSessionCleanup',
   'setActiveQuestion', 'submitPrompt', 'takeAnswer', 'updateSession',
 ]
 const dataUrl = (source) => `data:text/javascript,${encodeURIComponent(source)}`
 const forward = (root, names) => names.map((name) =>
   `export const ${name} = (...args) => globalThis.__fx0Runtime.${root}.${name}(...args)`).join('\n')
-const journalUrl = dataUrl(`export class SessionCleanupError extends Error {}\nexport const QUESTION_WAIT_MS = 600000\n` + forward('journal', journalNames))
+const journalUrl = dataUrl(`export class SessionCleanupError extends Error {}\nexport const QUESTION_WAIT_MS = 600000\nexport const MAX_CHAT_ASSETS = 50\nexport const MAX_DAILY_ASSETS = 100\n` + forward('journal', journalNames))
 const libfxUrl = dataUrl(forward('libfx', ['createFxAgent', 'createFxEngine']))
 const credentialUrl = dataUrl(forward('credentialStore', ['saveTurnCredential', 'saveTrialCredential', 'renewLatestCredential', 'readTurnCredential', 'readExecutionFunding', 'dropLoginCredentials', 'dropChatCredential']))
 const historyUrl = dataUrl(forward('history', ['recordTurn', 'recordGeneration']))

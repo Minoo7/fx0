@@ -28,8 +28,8 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
   // Remote images become markers here; the wrapper loads each from /api/artifact-image
   // and embeds it before the design runs, so the design has no network and the
   // browser keeps the images across revisions (lib/remote-image.ts).
-  const marked = artifact != null && remoteImagesEnabled()
-    ? markRemoteImages(artifact, crypto.randomUUID().replaceAll('-', ''))
+  const marked = artifact != null
+    ? markRemoteImages(artifact, crypto.randomUUID().replaceAll('-', ''), { remote: remoteImagesEnabled() })
     : { html: artifact, images: [] }
   const images = marked.images.map(({ marker, url }) => ({ marker, src: artifactImageSrc(sessionId, url) }))
   const prepared = marked.html == null ? null : prepareDesignArtifactHtml(marked.html, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)

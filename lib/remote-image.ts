@@ -1,5 +1,5 @@
 // @ts-expect-error Node strip-types tests require the source extension.
-import { BLANK_IMAGE, rewriteRemoteImages } from './design-artifact.ts'
+import { assetReference, BLANK_IMAGE, rewriteRemoteImages } from './design-artifact.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { sniffImageType } from './image-sniff.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
@@ -23,14 +23,15 @@ export async function loadRemoteImage(url: string): Promise<string> {
 }
 
 /**
- * The design with each remote image replaced by a marker the wrapper swaps for the
+ * The design with each remote or attached image replaced by a marker the wrapper swaps for the
  * image, in document order, at most MAX_REMOTE_IMAGES; any other becomes a blank image.
  * The nonce is fresh per response, so the design's own text cannot name a marker.
  */
-export function markRemoteImages(html: string, nonce: string): { html: string; images: { marker: string; url: string }[] } {
+export function markRemoteImages(html: string, nonce: string, { remote = true } = {}): { html: string; images: { marker: string; url: string }[] } {
   const urls: string[] = []
   rewriteRemoteImages(html, (url: string) => {
-    if (!urls.includes(url)) urls.push(url)
+    // With remote images off, only attached images (fx0-asset:) are shown.
+    if (!urls.includes(url) && (remote || assetReference(url))) urls.push(url)
     return BLANK_IMAGE
   })
   const images = urls.slice(0, MAX_REMOTE_IMAGES).map((url, index) => ({ marker: `fx0-image-${nonce}-${index}`, url }))

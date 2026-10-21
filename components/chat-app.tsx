@@ -1353,7 +1353,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       if (!response.ok) {
         const detail = await response.text().catch(() => '')
         let code: string | undefined
-        try { code = JSON.parse(detail)?.code } catch { /* Other errors can be plain text. */ }
+        let reason: string | undefined
+        try { ({ code, error: reason } = JSON.parse(detail) ?? {}) } catch { /* Other errors can be plain text. */ }
         if (user.guest && response.status === 402 && code === 'trial_exhausted') {
           setFreePrompts(0)
           composerRef.current?.restoreDraft({ text: value, images, designMd: designPick })
@@ -1363,6 +1364,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
           setSignInOpen(true)
           return
         }
+        // A refused size or image limit is the user's to act on: show its own words.
+        if ((response.status === 413 || response.status === 429) && typeof reason === 'string') throw new Error(reason)
         throw new Error(`prompt failed: ${response.status}${detail ? ` — ${detail.slice(0, 300)}` : ''}`)
       }
       const remaining = response.headers.get('x-fx0-free-prompts')

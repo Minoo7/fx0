@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { remoteImageUrl } from './design-artifact.ts'
+import { assetReference, remoteImageUrl } from './design-artifact.ts'
 
 // The wrapper loads a design's images from /api/artifact-image. The route serves only the
 // chat's owner, and only a URL artifact-frame signed for that chat, so it cannot be used
@@ -22,9 +22,9 @@ export function artifactImageSrc(sessionId: string, url: string): string {
   return `${ARTIFACT_IMAGE_PATH}?${params}`
 }
 
-/** The remote image a request may load for this chat, or null. */
+/** The remote image or attached-image reference a request may load for this chat, or null. */
 export function verifyArtifactImage(sessionId: string, value: string | null, sig: string | null): string | null {
-  const url = value == null ? null : remoteImageUrl(value)
+  const url = value == null ? null : assetReference(value) ?? remoteImageUrl(value)
   if (!url || url !== value || !sig || !/^[A-Za-z0-9_-]{43}$/.test(sig)) return null
   const given = Buffer.from(sig, 'base64url')
   const expected = signature(sessionId, url)
