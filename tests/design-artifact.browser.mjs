@@ -174,3 +174,38 @@ for (const name of ['small', 'large']) {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+// The draft has no network, so a remote image must show the soft placeholder, never
+// the browser's broken-image icon. The draft cleaner runs in Chrome, types stripped.
+test('in Chrome, a draft shows a placeholder for remote images instead of a broken icon', async () => {
+  assert.ok(existsSync(CHROME), `Chrome not found at ${CHROME}; set CHROME_PATH`)
+  const { stripTypeScriptTypes } = await import('node:module')
+  const source = await (await import('node:fs/promises')).readFile(new URL('../lib/draft-preview.ts', import.meta.url), 'utf8')
+  const cleaner = stripTypeScriptTypes(source).replace(/^export /gm, '')
+  const draft = `<!doctype html><html><head></head><body>
+<img id="remote" alt="Bistro dining room" src="https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=1600">
+<img id="srcset" alt="Kitchen" srcset="https://example.com/a.png 1x, https://example.com/b.png 2x">
+<img id="embedded" alt="" src="data:image/png;base64,${PIXEL}">
+</body></html>`
+  const dir = await mkdtemp(join(tmpdir(), 'fx0-draft-'))
+  try {
+    const file = join(dir, 'page.html')
+    await writeFile(file, `<!doctype html><html><head><title>draft</title></head><body><pre id="out">{}</pre><script>${cleaner}
+const frame = document.createElement('iframe')
+frame.srcdoc = draftDocument(${JSON.stringify(draft)})
+frame.onload = () => setTimeout(() => {
+  const out = {}
+  for (const image of frame.contentDocument.images) out[image.id] = image.complete && image.naturalWidth > 0 ? (image.src.startsWith('data:image/svg+xml') ? 'placeholder' : 'image') : 'broken'
+  document.getElementById('out').textContent = JSON.stringify(out)
+}, 200)
+document.body.append(frame)
+</script></body></html>`)
+    const { stdout } = await promisify(execFile)(CHROME, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+      `--user-data-dir=${join(dir, 'profile')}`, '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(file).href,
+    ], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
+    assert.deepEqual(JSON.parse(stdout.match(/<pre id="out">([^<]*)<\/pre>/)[1]), { remote: 'placeholder', srcset: 'placeholder', embedded: 'image' })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
