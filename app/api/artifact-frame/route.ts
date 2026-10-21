@@ -1,4 +1,5 @@
-import { DESIGN_ARTIFACT_EMBEDDED_CSP, DESIGN_FRAME_CSP, prepareDesignArtifactHtml } from '../../../lib/design-artifact'
+import { designArtifactEmbeddedCsp, designFrameCsp, prepareDesignArtifactHtml, rewriteRemoteImages } from '../../../lib/design-artifact'
+import { REMOTE_IMAGE_PATH, remoteImageEpoch, remoteImagesEnabled, signRemoteImage } from '../../../lib/remote-image'
 import { readDesignArtifactAt } from '../../../lib/journal'
 import { readGeneration } from '../../../lib/history'
 import { withSessionRoute } from '../../../lib/route-auth'
@@ -18,12 +19,20 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
   // so a reload costs a 304 and a signed-out browser gets nothing from its cache.
   const version = Number(params.get('v'))
   const cacheable = live?.html != null && Number.isSafeInteger(version) && version > 0 && version === live.revision
-  const etag = cacheable ? `"${sessionId}:${live.revision}"` : null
+  // Remote images go through the proxy at signed, absolute URLs (a data: document
+  // resolves no relative ones). The day is in the ETag, so a kept response is
+  // replaced with freshly signed URLs long before the old ones expire.
+  const remote = remoteImagesEnabled()
+  const origin = new URL(request.url).origin
+  const now = Date.now()
+  const etag = cacheable ? `"${sessionId}:${live.revision}:${remote ? remoteImageEpoch(now) : 'local'}"` : null
   if (etag && request.headers.get('if-none-match') === etag) {
     return new Response(null, { status: 304, headers: { 'cache-control': 'private, no-cache', etag } })
   }
   const readyToken = crypto.randomUUID()
-  const prepared = artifact == null ? null : prepareDesignArtifactHtml(artifact, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
+  const imageSources = remote ? [`${origin}${REMOTE_IMAGE_PATH}`] : []
+  const shown = artifact != null && remote ? rewriteRemoteImages(artifact, (url) => signRemoteImage(origin, url, now)) : artifact
+  const prepared = shown == null ? null : prepareDesignArtifactHtml(shown, designArtifactEmbeddedCsp(imageSources), readyToken)
   // Every stored design passed validation, so this only guards against one that
   // somehow lacks a doctype: it is never shown without its CSP.
   if (artifact != null && prepared == null) log(sessionId, 'artifact:unrenderable', { revision: past ? revision : live!.revision })
@@ -91,7 +100,7 @@ document.querySelector('#frame-root').append(frame);
     headers: {
       'cache-control': etag ? 'private, no-cache' : 'private, no-store',
       ...(etag ? { etag } : {}),
-      'content-security-policy': DESIGN_FRAME_CSP,
+      'content-security-policy': designFrameCsp(imageSources),
       'content-type': 'text/html; charset=utf-8',
       'permissions-policy':
         'accelerometer=(), camera=(), clipboard-read=(), clipboard-write=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=()',

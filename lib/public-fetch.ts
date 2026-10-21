@@ -43,8 +43,26 @@ export async function publicDestination(input: string, resolve = dns.lookup) {
   return { url, address: addresses[0] }
 }
 
-/** DNS validation and the connection share the same address; never resolve again. */
+// Remote images a design shows, fetched by the image proxy. Only https, every hop.
+export const MAX_IMAGE_FETCH_BYTES = 8 * 1024 * 1024
+
+interface FetchOptions { maxBytes: number; httpsOnly?: boolean; accept?: string }
+
 export async function fetchPublicText(input: string, signal: AbortSignal) {
+  const { status, url, body } = await fetchPublic(input, signal, { maxBytes: MAX_FETCH_BYTES })
+  return { status, url, raw: body.toString('utf8') }
+}
+
+export async function fetchPublicImage(input: string, signal: AbortSignal) {
+  const response = await fetchPublic(input, signal, {
+    maxBytes: MAX_IMAGE_FETCH_BYTES, httpsOnly: true, accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif',
+  })
+  if (response.status < 200 || response.status > 299) throw new Error('Image request failed')
+  return response
+}
+
+/** DNS validation and the connection share the same address; never resolve again. */
+async function fetchPublic(input: string, signal: AbortSignal, options: FetchOptions) {
   let next = input
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     signal.throwIfAborted()
@@ -55,11 +73,12 @@ export async function fetchPublicText(input: string, signal: AbortSignal) {
     })
     signal.throwIfAborted()
     const { url, address } = destination
+    if (options.httpsOnly && url.protocol !== 'https:') throw new Error('HTTPS required')
     const response = await new Promise<http.IncomingMessage>((resolve, reject) => {
       const transport = url.protocol === 'https:' ? https : http
       const request = transport.request(url, {
         signal, agent: false,
-        headers: { 'user-agent': 'fx0/1.0', 'accept-encoding': 'identity' },
+        headers: { 'user-agent': 'fx0/1.0', 'accept-encoding': 'identity', ...(options.accept ? { accept: options.accept } : {}) },
         // Keep the URL hostname for Host and TLS certificate verification.
         lookup: (_hostname, options, callback) => {
           if (options.all) callback(null, [address])
@@ -79,17 +98,17 @@ export async function fetchPublicText(input: string, signal: AbortSignal) {
         next = new URL(response.headers.location, url).href
         continue
       }
-      if (Number(response.headers['content-length']) > MAX_FETCH_BYTES) throw new Error('Response too large')
+      if (Number(response.headers['content-length']) > options.maxBytes) throw new Error('Response too large')
       const encoding = response.headers['content-encoding']
       if (encoding && encoding !== 'identity') throw new Error('Unsupported content encoding')
       const chunks: Buffer[] = []
       let bytes = 0
       for await (const chunk of response) {
         bytes += chunk.length
-        if (bytes > MAX_FETCH_BYTES) throw new Error('Response too large')
+        if (bytes > options.maxBytes) throw new Error('Response too large')
         chunks.push(Buffer.from(chunk))
       }
-      return { status, url: url.href, raw: Buffer.concat(chunks, bytes).toString('utf8') }
+      return { status, url: url.href, body: Buffer.concat(chunks, bytes) }
     } finally {
       signal.removeEventListener('abort', abortBody)
       response.destroy()

@@ -1,44 +1,58 @@
+// @ts-expect-error Node strip-types tests require the source extension.
+import { remoteImagesEnabled, remoteImageUrl } from './remote-image.ts'
+
 export const MAX_DESIGN_ARTIFACT_BYTES = 512 * 1024
 
-export const DESIGN_ARTIFACT_EMBEDDED_CSP = [
-  "default-src 'none'",
-  "script-src 'unsafe-inline'",
-  "style-src 'unsafe-inline'",
-  'img-src data:',
-  'font-src data:',
-  'media-src data:',
-  "connect-src 'none'",
-  "child-src 'none'",
-  "frame-src 'none'",
-  "worker-src 'none'",
-  "object-src 'none'",
-  "manifest-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-].join('; ')
+// `imageSources` are the proxy paths a prepared design may load images from, as
+// absolute source expressions; nothing else on the network is ever allowed.
+export function designArtifactEmbeddedCsp(imageSources: readonly string[] = []): string {
+  return [
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline'",
+    ['img-src data:', ...imageSources].join(' '),
+    'font-src data:',
+    'media-src data:',
+    "connect-src 'none'",
+    "child-src 'none'",
+    "frame-src 'none'",
+    "worker-src 'none'",
+    "object-src 'none'",
+    "manifest-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ].join('; ')
+}
 
 // The wrapper that frames the design. Its data: frame inherits this policy on top of
 // the embedded one, so anything the design may load must be allowed here too.
-export const DESIGN_FRAME_CSP = [
-  "default-src 'none'",
-  'frame-src data:',
-  "script-src 'unsafe-inline'",
-  "style-src 'unsafe-inline'",
-  'img-src data:',
-  'font-src data:',
-  'media-src data:',
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'self'",
-].join('; ')
+export function designFrameCsp(imageSources: readonly string[] = []): string {
+  return [
+    "default-src 'none'",
+    'frame-src data:',
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline'",
+    ['img-src data:', ...imageSources].join(' '),
+    'font-src data:',
+    'media-src data:',
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'self'",
+  ].join('; ')
+}
+
+export const DESIGN_ARTIFACT_EMBEDDED_CSP = designArtifactEmbeddedCsp()
+export const DESIGN_FRAME_CSP = designFrameCsp()
 
 function designArtifactBootstrap(readyToken?: string): string {
   // The sandbox grants no popups, so a clicked https link asks the app to open it
   // (see app/api/artifact-frame): the app shows the address and opens it only on the
   // user's own click there, instead of the design navigating the preview away.
+  // "painted" waits for load, so images are in, but a slow remote image may delay it
+  // only 1.5 s past parsing: the app swaps revisions on it.
   const heartbeat = readyToken
-    ? `const token=${JSON.stringify(readyToken)};const send=type=>parent.postMessage({type,token},"*");send("heartbeat");setInterval(()=>send("heartbeat"),500);addEventListener("load",()=>{send("ready");requestAnimationFrame(()=>requestAnimationFrame(()=>send("painted")))},{once:true});addEventListener("click",event=>{const link=event.target instanceof Element&&event.target.closest("a[href]");const url=link?link.getAttribute("href")||"":"";if(/^https:/i.test(url)){event.preventDefault();parent.postMessage({type:"open",token,url},"*")}},true);`
+    ? `const token=${JSON.stringify(readyToken)};const send=type=>parent.postMessage({type,token},"*");send("heartbeat");setInterval(()=>send("heartbeat"),500);let painted=false;const paint=()=>{if(painted)return;painted=true;requestAnimationFrame(()=>requestAnimationFrame(()=>send("painted")))};addEventListener("load",()=>{send("ready");paint()},{once:true});addEventListener("DOMContentLoaded",()=>setTimeout(paint,1500),{once:true});addEventListener("click",event=>{const link=event.target instanceof Element&&event.target.closest("a[href]");const url=link?link.getAttribute("href")||"":"";if(/^https:/i.test(url)){event.preventDefault();parent.postMessage({type:"open",token,url},"*")}},true);`
     : ''
   return `<script>(()=>{for(const name of ["RTCPeerConnection","webkitRTCPeerConnection","RTCIceGatherer"]){try{Object.defineProperty(globalThis,name,{value:undefined,writable:false,configurable:false})}catch{}}${heartbeat}})()</script>`
 }
@@ -79,10 +93,20 @@ function visibleStart(html: string): string {
 // `html` is the normalized document: the exact value to store.
 export type DesignArtifactValidation = { ok: true; bytes: number; html: string } | { ok: false; error: string }
 
+// Where an attribute's raw value sits in the source, quotes included, so a prepared
+// copy can replace exactly that value.
+interface SourceRange {
+  start: number
+  end: number
+}
+
 interface HtmlTag {
   name: string
   attributes: Map<string, string>
+  valueRanges: Map<string, SourceRange>
   duplicateAttribute: string | null
+  // The raw text of a <style> element.
+  content?: SourceRange
 }
 
 const PROHIBITED_TAGS = new Map([
@@ -108,10 +132,11 @@ function findTagEnd(source: string, start: number): number {
   return -1
 }
 
-function parseAttributes(source: string): Pick<HtmlTag, 'attributes' | 'duplicateAttribute'> {
+function parseAttributes(source: string, offset: number): Pick<HtmlTag, 'attributes' | 'valueRanges' | 'duplicateAttribute'> {
   const attributes = new Map<string, string>()
+  const valueRanges = new Map<string, SourceRange>()
   let duplicateAttribute: string | null = null
-  const pattern = /([^\s"'<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g
+  const pattern = /([^\s"'<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/dg
   for (const match of source.matchAll(pattern)) {
     const name = match[1].toLowerCase()
     if (name === '/') continue
@@ -120,8 +145,12 @@ function parseAttributes(source: string): Pick<HtmlTag, 'attributes' | 'duplicat
       continue
     }
     attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '')
+    const quoted = match.indices![2] ?? match.indices![3]
+    const bare = match.indices![4]
+    if (quoted) valueRanges.set(name, { start: offset + quoted[0] - 1, end: offset + quoted[1] + 1 })
+    else if (bare) valueRanges.set(name, { start: offset + bare[0], end: offset + bare[1] })
   }
-  return { attributes, duplicateAttribute }
+  return { attributes, valueRanges, duplicateAttribute }
 }
 
 function parseOpeningTags(source: string): HtmlTag[] {
@@ -149,11 +178,13 @@ function parseOpeningTags(source: string): HtmlTag[] {
     const end = findTagEnd(source, start + 1 + nameMatch[0].length)
     if (end < 0) break
     const name = nameMatch[1].toLowerCase()
-    const attributeSource = source.slice(start + 1 + nameMatch[0].length, end)
-    tags.push({ name, ...parseAttributes(attributeSource) })
+    const attributeStart = start + 1 + nameMatch[0].length
+    const tag: HtmlTag = { name, ...parseAttributes(source.slice(attributeStart, end), attributeStart) }
+    tags.push(tag)
     if (name === 'script' || name === 'style') {
       const closing = normalized.indexOf(`</${name}`, end + 1)
       cursor = closing < 0 ? source.length : closing
+      if (name === 'style') tag.content = { start: end + 1, end: cursor }
     } else {
       cursor = end + 1
     }
@@ -203,7 +234,40 @@ function isEmbeddedSrcset(tag: string, value: string): boolean {
   return /^data:image\/[a-z0-9.+-]+(?:;[^,\s]*)*$/i.test(metadata) && /^\S+(?:\s+(?:\d+(?:\.\d+)?[wx]))?$/.test(payload)
 }
 
-function validateTag(tag: HtmlTag): string | null {
+interface SrcsetCandidate {
+  url: string
+  descriptor: string
+}
+
+// A srcset of remote image candidates, split the way the HTML parser splits it (a URL
+// runs to whitespace; trailing commas end it), or null when any candidate is not one.
+function remoteSrcset(value: string): SrcsetCandidate[] | null {
+  const candidates: SrcsetCandidate[] = []
+  let index = 0
+  while (index < value.length) {
+    while (index < value.length && /[\s,]/.test(value[index])) index++
+    if (index >= value.length) break
+    const urlStart = index
+    while (index < value.length && !/\s/.test(value[index])) index++
+    let raw = value.slice(urlStart, index)
+    let descriptor = ''
+    if (raw.endsWith(',')) {
+      raw = raw.replace(/,+$/, '')
+    } else {
+      const descriptorStart = index
+      while (index < value.length && value[index] !== ',') index++
+      descriptor = value.slice(descriptorStart, index).trim()
+    }
+    const url = remoteImageUrl(raw)
+    if (!url || !/^(?:\d+(?:\.\d+)?[wx])?$/.test(descriptor)) return null
+    candidates.push({ url, descriptor })
+  }
+  return candidates.length ? candidates : null
+}
+
+const remoteImageValue = (rawValue: string) => remoteImageUrl(decodeAttribute(rawValue))
+
+function validateTag(tag: HtmlTag, remote: boolean): string | null {
   if (tag.duplicateAttribute) {
     return `design artifact must not repeat the ${tag.duplicateAttribute} attribute`
   }
@@ -229,28 +293,144 @@ function validateTag(tag: HtmlTag): string | null {
     }
     if (name === 'href' || name === 'xlink:href') {
       const value = decodeAttribute(rawValue)
-      const isSafeSvgImage = tag.name === 'image' && /^data:image\//i.test(value)
+      const isSafeSvgImage = tag.name === 'image' && (/^data:image\//i.test(value) || (remote && !!remoteImageUrl(value)))
       // Links to https pages (cited sources, references) open in a new tab; see the bootstrap.
       const isExternalLink = tag.name === 'a' && name === 'href' && /^https:\/\/[^\s]+$/i.test(value)
       if (!value.startsWith('#') && !isSafeSvgImage && !isExternalLink) {
         return `design artifact ${name} values must be local fragments, https links, or compatible embedded data: URLs`
       }
     }
-    if (name === 'src' && !isEmbeddedSource(tag.name, rawValue)) {
-      return 'design artifact src values must use a compatible embedded data: URL'
+    if (name === 'src' && !isEmbeddedSource(tag.name, rawValue) && !(remote && tag.name === 'img' && remoteImageValue(rawValue))) {
+      return remote
+        ? 'design artifact src values must be an https image URL on <img> or a compatible embedded data: URL'
+        : 'design artifact src values must use a compatible embedded data: URL'
     }
-    if (name === 'srcset' && !isEmbeddedSrcset(tag.name, rawValue)) {
-      return 'design artifact srcset values must contain one embedded data:image URL'
+    if (name === 'srcset' && !isEmbeddedSrcset(tag.name, rawValue) &&
+      !(remote && (tag.name === 'img' || tag.name === 'source') && remoteSrcset(decodeAttribute(rawValue)))) {
+      return remote
+        ? 'design artifact srcset values must list https image URLs or contain one embedded data:image URL'
+        : 'design artifact srcset values must contain one embedded data:image URL'
     }
-    if (name === 'poster' && !/^data:image\//i.test(decodeAttribute(rawValue))) {
-      return 'design artifact poster values must use an embedded data:image URL'
+    if (name === 'poster' && !/^data:image\//i.test(decodeAttribute(rawValue)) && !(remote && remoteImageValue(rawValue))) {
+      return remote
+        ? 'design artifact poster values must use an https image URL or an embedded data:image URL'
+        : 'design artifact poster values must use an embedded data:image URL'
     }
   }
 
   return null
 }
 
-export function validateDesignArtifactHtml(html: string): DesignArtifactValidation {
+// Prepared copies only: every remote image the markup or its CSS names, in the
+// places validation accepts it, becomes `proxy(url)`. The stored design is untouched;
+// text, scripts and anything else that merely contains a URL are never rewritten.
+export function rewriteRemoteImages(html: string, proxy: (url: string) => string): string {
+  const edits: (SourceRange & { text: string })[] = []
+  const attribute = (url: string) => `"${escapeAttribute(safeUrl(proxy(url)))}"`
+  for (const tag of parseOpeningTags(html)) {
+    for (const [name, range] of tag.valueRanges) {
+      const raw = tag.attributes.get(name)!
+      let url: string | null = null
+      if (name === 'src' && tag.name === 'img') url = remoteImageValue(raw)
+      else if (name === 'poster' && tag.name === 'video') url = remoteImageValue(raw)
+      else if ((name === 'href' || name === 'xlink:href') && tag.name === 'image') url = remoteImageValue(raw)
+      if (url) {
+        edits.push({ ...range, text: attribute(url) })
+      } else if (name === 'srcset' && (tag.name === 'img' || tag.name === 'source')) {
+        const candidates = remoteSrcset(decodeAttribute(raw))
+        if (candidates) {
+          const value = candidates.map(({ url: candidate, descriptor }) => [safeUrl(proxy(candidate)), descriptor].filter(Boolean).join(' ')).join(', ')
+          edits.push({ ...range, text: `"${escapeAttribute(value)}"` })
+        }
+      } else if (name === 'style') {
+        const quoted = html[range.start] === '"' || html[range.start] === "'"
+        const inner = quoted ? { start: range.start + 1, end: range.end - 1 } : range
+        for (const edit of cssUrlEdits(html, inner, true)) edits.push({ ...edit, text: `url(${escapeAttribute(safeUrl(proxy(edit.url)))})` })
+      }
+    }
+    if (tag.content) {
+      for (const edit of cssUrlEdits(html, tag.content, false)) edits.push({ ...edit, text: `url(${safeUrl(proxy(edit.url))})` })
+    }
+  }
+  let result = html
+  for (const edit of edits.sort((a, b) => b.start - a.start)) result = result.slice(0, edit.start) + edit.text + result.slice(edit.end)
+  return result
+}
+
+// A proxy URL goes unquoted into CSS url() and into attributes: only characters that
+// need no escaping in either may remain (encodeURIComponent keeps ! ' ( ) *).
+function safeUrl(url: string): string {
+  return url.replace(/[^A-Za-z0-9\-._~%&=?/:+]/g, (character) =>
+    encodeURIComponent(character).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`))
+}
+
+// In a style attribute the browser decodes character references first, so quotes may
+// be spelled as references there.
+const ATTRIBUTE_QUOTES = ['"', "'", '&quot;', '&#34;', '&#x22;', '&apos;', '&#39;', '&#x27;']
+const STYLE_QUOTES = ['"', "'"]
+
+// The url() tokens in a CSS range whose argument is a remote image URL, skipping
+// comments and strings. An argument with a CSS escape is left alone (and stays blocked).
+function cssUrlEdits(source: string, range: SourceRange, inAttribute: boolean): (SourceRange & { url: string })[] {
+  const quotes = inAttribute ? ATTRIBUTE_QUOTES : STYLE_QUOTES
+  const lower = source.toLowerCase()
+  const quoteAt = (index: number) => quotes.find((quote) => lower.startsWith(quote, index))
+  const edits: (SourceRange & { url: string })[] = []
+  let index = range.start
+  while (index < range.end) {
+    if (lower.startsWith('/*', index)) {
+      const close = lower.indexOf('*/', index + 2)
+      index = close < 0 || close + 2 > range.end ? range.end : close + 2
+      continue
+    }
+    const quote = quoteAt(index)
+    if (quote) {
+      index = stringEnd(lower, index + quote.length, quote, range.end)
+      continue
+    }
+    if (lower.startsWith('url(', index) && !/[\w-]/.test(lower[index - 1] ?? '')) {
+      const token = cssUrlToken(source, lower, index + 4, range.end, quoteAt)
+      if (token) {
+        const value = (inAttribute ? decodeAttribute(token.value) : token.value).trim()
+        const url = value.includes('\\') ? null : remoteImageUrl(value)
+        if (url) edits.push({ start: index, end: token.end, url })
+        index = token.end
+        continue
+      }
+    }
+    index++
+  }
+  return edits
+}
+
+function stringEnd(lower: string, index: number, quote: string, limit: number): number {
+  while (index < limit) {
+    if (lower[index] === '\\') index += 2
+    else if (lower.startsWith(quote, index)) return index + quote.length
+    else index++
+  }
+  return limit
+}
+
+function cssUrlToken(source: string, lower: string, index: number, limit: number, quoteAt: (index: number) => string | undefined) {
+  while (index < limit && /\s/.test(source[index])) index++
+  const quote = quoteAt(index)
+  let value: string
+  if (quote) {
+    const close = stringEnd(lower, index + quote.length, quote, limit)
+    value = source.slice(index + quote.length, close - quote.length)
+    index = close
+    while (index < limit && /\s/.test(source[index])) index++
+  } else {
+    const close = source.indexOf(')', index)
+    if (close < 0 || close >= limit) return null
+    value = source.slice(index, close)
+    index = close
+  }
+  return source[index] === ')' ? { value, end: index + 1 } : null
+}
+
+export function validateDesignArtifactHtml(html: string, { remoteImages = remoteImagesEnabled() } = {}): DesignArtifactValidation {
   const source = normalizeDesignArtifactHtml(html)
   const bytes = Buffer.byteLength(source, 'utf8')
   if (bytes > MAX_DESIGN_ARTIFACT_BYTES) {
@@ -286,7 +466,7 @@ export function validateDesignArtifactHtml(html: string): DesignArtifactValidati
   }
 
   for (const tag of parseOpeningTags(source)) {
-    const error = validateTag(tag)
+    const error = validateTag(tag, remoteImages)
     if (error) return { ok: false, error }
   }
 

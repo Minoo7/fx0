@@ -611,19 +611,67 @@ test('design artifact validation rejects comments, meta refresh, base, links, an
   )
 })
 
-test('design artifact validation rejects external asset and action values', () => {
+test('with remote images off, design artifact validation rejects every external asset', () => {
+  const local = (html) => validateDesignArtifactHtml(html, { remoteImages: false })
+  assert.deepEqual(local(documentWith('<img src="https://example.com/image.png" alt="">')),
+    { ok: false, error: 'design artifact src values must use a compatible embedded data: URL' })
+  assert.deepEqual(local(documentWith('<img srcset="https://example.com/image.png 2x" alt="">')),
+    { ok: false, error: 'design artifact srcset values must contain one embedded data:image URL' })
+  assert.deepEqual(local(documentWith('<video poster="https://example.com/p.png"></video>')),
+    { ok: false, error: 'design artifact poster values must use an embedded data:image URL' })
+  assert.deepEqual(local(documentWith('<svg><image href="https://example.com/a.png"/></svg>')),
+    { ok: false, error: 'design artifact href values must be local fragments, https links, or compatible embedded data: URLs' })
+})
+
+test('design artifact validation accepts remote https images only where they are images', () => {
+  for (const body of [
+    '<img src="https://example.com/image.png" alt="">',
+    '<img src="https://example.com/a.png?w=10&amp;h=20" alt="">',
+    '<img srcset="https://example.com/a.png 1x, https://example.com/b.png 2x" alt="">',
+    '<img srcset="https://cdn.example.com/w_100,h_100/a.png 100w,https://cdn.example.com/b.png 200w" alt="">',
+    '<picture><source srcset="https://example.com/a.webp"><img src="https://example.com/a.png" alt=""></picture>',
+    '<video poster="https://example.com/p.png"></video>',
+    '<svg><image href="https://example.com/a.png"/><image xlink:href="https://example.com/b.png"/></svg>',
+  ]) assert.equal(validateDesignArtifactHtml(documentWith(body)).ok, true, body)
   assertInvalid(
-    documentWith('<img src="https://example.com/image.png" alt="">'),
-    'design artifact src values must use a compatible embedded data: URL',
+    documentWith('<img src="http://example.com/image.png" alt="">'),
+    'design artifact src values must be an https image URL on <img> or a compatible embedded data: URL',
   )
   assertInvalid(
-    documentWith('<img srcset="https://example.com/image.png 2x" alt="">'),
-    'design artifact srcset values must contain one embedded data:image URL',
+    documentWith('<img src="https://user:pass@example.com/image.png" alt="">'),
+    'design artifact src values must be an https image URL on <img> or a compatible embedded data: URL',
+  )
+  assertInvalid(
+    documentWith(`<img src="https://example.com/${'a'.repeat(2048)}.png" alt="">`),
+    'design artifact src values must be an https image URL on <img> or a compatible embedded data: URL',
+  )
+  assertInvalid(
+    documentWith('<audio src="https://example.com/a.mp3"></audio>'),
+    'design artifact src values must be an https image URL on <img> or a compatible embedded data: URL',
+  )
+  assertInvalid(
+    documentWith('<video><source src="https://example.com/a.mp4"></video>'),
+    'design artifact src values must be an https image URL on <img> or a compatible embedded data: URL',
   )
   assertInvalid(
     documentWith('<img srcset="data:image/gif;base64,R0lGODlhAQABAAAAACw= 1x, https://example.com/image.png 2x" alt="">'),
-    'design artifact srcset values must contain one embedded data:image URL',
+    'design artifact srcset values must list https image URLs or contain one embedded data:image URL',
   )
+  assertInvalid(
+    documentWith('<img srcset="https://example.com/a.png 2y" alt="">'),
+    'design artifact srcset values must list https image URLs or contain one embedded data:image URL',
+  )
+  assertInvalid(
+    documentWith('<script src="https://example.com/app.js"></script>'),
+    'design artifact scripts must be inline',
+  )
+  assertInvalid(
+    documentWith('<link rel="stylesheet" href="https://example.com/a.css">'),
+    'design artifact href values must be local fragments, https links, or compatible embedded data: URLs',
+  )
+})
+
+test('design artifact validation rejects external action values', () => {
   assertInvalid(
     documentWith('<button formaction="/submit">Send</button>'),
     'design artifact must not contain formaction attributes',
