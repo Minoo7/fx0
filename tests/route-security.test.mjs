@@ -237,7 +237,7 @@ function request(path, method = 'GET', id = own, body, origin = process.env.APP_
   return req
 }
 const routes = {}
-for (const name of ['answer', 'artifact', 'artifact-frame', 'cancel', 'debug', 'events',
+for (const name of ['answer', 'artifact', 'artifact-frame', 'artifact-image', 'cancel', 'debug', 'events',
   'credits', 'model', 'prompt', 'session', 'sessions', 'teams', 'warm']) {
   routes[name] = await import(`../app/api/${name}/route.ts`)
 }
@@ -478,6 +478,23 @@ test('the artifact preview permits iframe origins but preserves opaque credentia
   assert.match(frame.headers.get('content-security-policy'), /frame-src blob:;/)
   assert.doesNotMatch(html, /allow-same-origin|user-token|secret-refresh/)
   assert.match(frame.headers.get('content-security-policy'), /frame-ancestors 'self'/)
+})
+
+test('the wrapper\'s image route serves only URLs artifact-frame signed for this chat, and never caches a refusal', async () => {
+  if ((process.env.SESSION_SECRET ?? '').length < 32) process.env.SESSION_SECRET = 'deterministic-route-security-secret-32+'
+  const { artifactImageSrc } = await import('../lib/artifact-image.ts')
+  const url = 'https://images.example.com/a.png'
+  // Another user's chat is refused by ownership, even with a URL validly signed for it.
+  reset()
+  const theirs = await routes['artifact-image'].GET(new Request(`https://fx0.example${artifactImageSrc(foreign, url)}`, { headers: { origin: process.env.APP_URL } }))
+  assert.equal(theirs.status, 404)
+  for (const query of ['', `&u=${encodeURIComponent(url)}`, `&u=${encodeURIComponent(url)}&sig=${'A'.repeat(43)}`,
+    `&${new URL(artifactImageSrc(foreign, url), 'https://fx0.example').searchParams.toString().replace(/^session=[^&]*&/, '')}`]) {
+    reset()
+    const response = await routes['artifact-image'].GET(new Request(`https://fx0.example/api/artifact-image?session=${own}${query}`, { headers: { origin: process.env.APP_URL } }))
+    assert.equal(response.status, 404, query || 'no URL')
+    assert.equal(response.headers.get('cache-control'), 'private, no-store')
+  }
 })
 
 test('the artifact preview paints no white of its own before the design does', async () => {

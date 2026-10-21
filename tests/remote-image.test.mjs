@@ -14,7 +14,8 @@ registerHooks({
   },
 })
 import { BLANK_IMAGE, DESIGN_ARTIFACT_EMBEDDED_CSP, MAX_DESIGN_ARTIFACT_BYTES, remoteImageUrl, rewriteRemoteImages, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
-import { embedRemoteImages, loadRemoteImage, MAX_REMOTE_IMAGES, MAX_REMOTE_IMAGES_TOTAL_BYTES } from '../lib/remote-image.ts'
+import { loadRemoteImage, markRemoteImages, MAX_REMOTE_IMAGES } from '../lib/remote-image.ts'
+import { artifactImageSrc, verifyArtifactImage } from '../lib/artifact-image.ts'
 import { sniffImageType } from '../lib/image-sniff.ts'
 import { MAX_IMAGE_FETCH_BYTES } from '../lib/public-fetch.ts'
 
@@ -88,34 +89,44 @@ test('anything but a base64 data: image becomes a blank image, so nothing can br
   }
 })
 
-test('embedding fetches each image once, in document order, within the count and size budgets', async () => {
+const NONCE = '0123456789abcdef0123456789abcdef'
+
+test('marking names each image once, in document order, up to the count budget', () => {
   const urls = Array.from({ length: MAX_REMOTE_IMAGES + 2 }, (_, index) => `https://example.com/${index}.png`)
-  const html = doc(urls.map((url) => `<img src="${url}">`).join('') + `<img src="${urls[0]}">`)
-  const fetched = []
-  const result = await embedRemoteImages(html, async (url) => { fetched.push(url); return PNG_URL })
-  assert.deepEqual(fetched, urls.slice(0, MAX_REMOTE_IMAGES))
-  assert.equal(result.complete, true)
-  assert.equal(result.html.split(PNG_URL).length - 1, MAX_REMOTE_IMAGES + 1, 'a repeated image is embedded everywhere it appears')
+  const html = doc(urls.map((url) => `<img src="${url}">`).join('') + `<div style="background:url(${urls[0]})"></div>`)
+  const result = markRemoteImages(html, NONCE)
+  assert.deepEqual(result.images.map(({ url }) => url), urls.slice(0, MAX_REMOTE_IMAGES))
+  assert.deepEqual(result.images[0], { marker: `fx0-image-${NONCE}-0`, url: urls[0] })
+  assert.equal(result.html.split(`fx0-image-${NONCE}-0`).length - 1, 2, 'every place an image appears carries its marker')
   assert.equal(result.html.split(BLANK_IMAGE).length - 1, 2, 'images past the count budget are blank')
   assert.ok(!result.html.includes('https://'))
-
-  const big = `data:image/png;base64,${'A'.repeat(Math.ceil(MAX_IMAGE_FETCH_BYTES * 4 / 3) - 8)}`
-  const sized = await embedRemoteImages(doc('<img src="https://example.com/1.png"><img src="https://example.com/2.png"><img src="https://example.com/3.png"><img src="https://example.com/4.png">'), async () => big)
-  assert.equal(sized.html.split(big).length - 1, 3, 'the total budget stops the fourth large image')
+  const plain = doc('<p>no images</p>')
+  assert.deepEqual(markRemoteImages(plain, NONCE), { html: plain, images: [] })
 })
 
-test('the size budget counts every place an image is written, so repeating one cannot expand the preview', async () => {
-  const big = `data:image/png;base64,${'A'.repeat(Math.ceil(1024 * 1024 * 4 / 3))}`
-  const source = doc('<img src="https://example.com/big.png">'.repeat(20) + '<div style="background:url(https://example.com/big.png)"></div>'.repeat(20))
-  const result = await embedRemoteImages(source, async () => big)
-  assert.equal(result.html.split(big).length - 1, 4, 'four 1 MiB copies fill the 4 MiB budget')
-  assert.ok(result.html.length < source.length + MAX_REMOTE_IMAGES_TOTAL_BYTES * 4 / 3 + 40 * BLANK_IMAGE.length)
+test('a design cannot forge a marker: only the ones fx0 writes, with this response\'s nonce, survive', () => {
+  const out = rewriteRemoteImages(doc('<img src="https://example.com/a.png">'), () => 'fx0-image-zz-0')
+  assert.ok(out.includes(`<img src="${BLANK_IMAGE}">`))
+  const typed = doc(`<p>fx0-image-${NONCE}-0</p><img src="https://example.com/a.png">`)
+  const marked = markRemoteImages(typed, 'ffffffffffffffffffffffffffffffff')
+  assert.ok(marked.html.includes(`<p>fx0-image-${NONCE}-0</p>`), 'text that looks like another nonce is not this response\'s marker')
+})
 
-  const many = doc('<img src="https://example.com/tiny.png">'.repeat(20_000))
-  const started = performance.now()
-  const tiny = await embedRemoteImages(many, async () => PNG_URL)
-  assert.equal(tiny.html.split(PNG_URL).length - 1, 20_000)
-  assert.ok(performance.now() - started < 2_000, 'rewriting grows with the output, not with the number of edits')
+test('an image URL is signed for one chat: another chat, URL or signature is refused', () => {
+  process.env.SESSION_SECRET ??= 'deterministic-artifact-image-test-secret-32+'
+  const chat = '11111111-1111-4111-8111-111111111111'
+  const url = 'https://images.example.com/a.png?w=100&h=50'
+  const src = new URL(artifactImageSrc(chat, url), 'https://fx0.example')
+  assert.equal(src.pathname, '/api/artifact-image')
+  assert.equal(src.searchParams.get('session'), chat)
+  assert.equal(artifactImageSrc(chat, url), artifactImageSrc(chat, url), 'stable, so the browser keeps it across revisions')
+  const sig = src.searchParams.get('sig')
+  assert.equal(verifyArtifactImage(chat, url, sig), url)
+  assert.equal(verifyArtifactImage('22222222-2222-4222-8222-222222222222', url, sig), null)
+  assert.equal(verifyArtifactImage(chat, 'https://images.example.com/b.png', sig), null)
+  assert.equal(verifyArtifactImage(chat, url, `${sig.slice(0, -1)}${sig.endsWith('A') ? 'B' : 'A'}`), null)
+  assert.equal(verifyArtifactImage(chat, url, null), null)
+  assert.equal(verifyArtifactImage(chat, 'http://images.example.com/a.png', sig), null)
 })
 
 test('preparing a design stays linear in its size, however its CSS is shaped', () => {
@@ -131,15 +142,6 @@ test('preparing a design stays linear in its size, however its CSS is shaped', (
     rewriteRemoteImages(html, () => PNG_URL)
     assert.ok(performance.now() - started < 500, `${name}: ${Math.round(performance.now() - started)} ms`)
   }
-})
-
-test('a failed image is blank and the copy is marked incomplete; a design without remote images is untouched', async () => {
-  const html = doc('<img src="https://example.com/ok.png"><img src="https://example.com/down.png">')
-  const result = await embedRemoteImages(html, async (url) => { if (url.endsWith('down.png')) throw new Error('down'); return PNG_URL })
-  assert.equal(result.complete, false)
-  assert.ok(result.html.includes(`<img src="${PNG_URL}"><img src="${BLANK_IMAGE}">`))
-  const plain = doc('<p>no images</p>')
-  assert.deepEqual(await embedRemoteImages(plain, async () => { throw new Error('never called') }), { html: plain, complete: true, images: 0 })
 })
 
 test('embedded designs need no network: the CSP stays data-only', () => {

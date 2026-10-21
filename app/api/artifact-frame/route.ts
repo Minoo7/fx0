@@ -1,6 +1,6 @@
-import { DESIGN_ARTIFACT_EMBEDDED_CSP, DESIGN_FRAME_CSP, designFrameHtml, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
-import { embedRemoteImages } from '../../../lib/remote-image'
-import { cachedRemoteImage } from '../../../lib/remote-image-cache'
+import { ARTIFACT_IMAGE_PATH, artifactImageSrc } from '../../../lib/artifact-image'
+import { DESIGN_ARTIFACT_EMBEDDED_CSP, designFrameCsp, designFrameHtml, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
+import { markRemoteImages } from '../../../lib/remote-image'
 import { readDesignArtifactAt } from '../../../lib/journal'
 import { readGeneration } from '../../../lib/history'
 import { withSessionRoute } from '../../../lib/route-auth'
@@ -25,15 +25,14 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
     return new Response(null, { status: 304, headers: { 'cache-control': 'private, no-cache', etag } })
   }
   const readyToken = crypto.randomUUID()
-  // Remote images are fetched here and embedded as data: URLs, so the design has no
-  // network while it runs (lib/remote-image.ts). A copy missing an image is not kept.
-  const embedStarted = performance.now()
-  const embedded = artifact != null && remoteImagesEnabled()
-    ? await embedRemoteImages(artifact, cachedRemoteImage)
-    : { html: artifact, complete: true, images: 0 }
-  const embedMs = Math.round(performance.now() - embedStarted)
-  const keep = etag != null && embedded.complete
-  const prepared = embedded.html == null ? null : prepareDesignArtifactHtml(embedded.html, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
+  // Remote images become markers here; the wrapper loads each from /api/artifact-image
+  // and embeds it before the design runs, so the design has no network and the
+  // browser keeps the images across revisions (lib/remote-image.ts).
+  const marked = artifact != null && remoteImagesEnabled()
+    ? markRemoteImages(artifact, crypto.randomUUID().replaceAll('-', ''))
+    : { html: artifact, images: [] }
+  const images = marked.images.map(({ marker, url }) => ({ marker, src: artifactImageSrc(sessionId, url) }))
+  const prepared = marked.html == null ? null : prepareDesignArtifactHtml(marked.html, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
   // Every stored design passed validation, so this only guards against one that
   // somehow lacks a doctype: it is never shown without its CSP.
   if (artifact != null && prepared == null) log(sessionId, 'artifact:unrenderable', { revision: past ? revision : live!.revision })
@@ -42,17 +41,13 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
       artifact != null ? 'This design could not be prepared for preview.'
         : past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
     }</p></body></html>`
-  const html = designFrameHtml(preparedArtifact, readyToken)
-  // Streamed: embedded images can take it past the buffered response limit.
-  const bytes = new TextEncoder().encode(html)
-  if (embedded.images) log(sessionId, 'artifact:images', { images: embedded.images, complete: embedded.complete, embedMs, bytes: bytes.length })
-  const body = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close() } })
-  return new Response(body, {
+  const html = designFrameHtml(preparedArtifact, readyToken, images)
+  return new Response(html, {
     status: artifact == null ? 404 : 200,
     headers: {
-      'cache-control': keep ? 'private, no-cache' : 'private, no-store',
-      ...(keep ? { etag } : {}),
-      'content-security-policy': DESIGN_FRAME_CSP,
+      'cache-control': etag ? 'private, no-cache' : 'private, no-store',
+      ...(etag ? { etag } : {}),
+      'content-security-policy': designFrameCsp(images.length ? `${new URL(request.url).origin}${ARTIFACT_IMAGE_PATH}` : undefined),
       'content-type': 'text/html; charset=utf-8',
       'permissions-policy':
         'accelerometer=(), camera=(), clipboard-read=(), clipboard-write=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=()',
