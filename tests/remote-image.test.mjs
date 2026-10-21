@@ -4,6 +4,15 @@ import https from 'node:https'
 import dns from 'node:dns/promises'
 import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
+import { registerHooks } from 'node:module'
+
+// lib/remote-image-cache.ts imports without extensions, as Next resolves them.
+registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier.startsWith('.') && !/\.[a-z]+$/.test(specifier) && !context.parentURL?.includes('/node_modules/')) return next(`${specifier}.ts`, context)
+    return next(specifier, context)
+  },
+})
 import { BLANK_IMAGE, DESIGN_ARTIFACT_EMBEDDED_CSP, MAX_DESIGN_ARTIFACT_BYTES, remoteImageUrl, rewriteRemoteImages, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
 import { embedRemoteImages, loadRemoteImage, MAX_REMOTE_IMAGES, MAX_REMOTE_IMAGES_TOTAL_BYTES } from '../lib/remote-image.ts'
 import { sniffImageType } from '../lib/image-sniff.ts'
@@ -130,7 +139,7 @@ test('a failed image is blank and the copy is marked incomplete; a design withou
   assert.equal(result.complete, false)
   assert.ok(result.html.includes(`<img src="${PNG_URL}"><img src="${BLANK_IMAGE}">`))
   const plain = doc('<p>no images</p>')
-  assert.deepEqual(await embedRemoteImages(plain, async () => { throw new Error('never called') }), { html: plain, complete: true })
+  assert.deepEqual(await embedRemoteImages(plain, async () => { throw new Error('never called') }), { html: plain, complete: true, images: 0 })
 })
 
 test('embedded designs need no network: the CSP stays data-only', () => {
@@ -192,4 +201,43 @@ test('with remote images off, a remote image is refused at publish', (t) => {
   process.env.FX0_REMOTE_IMAGES = '0'
   t.after(() => { delete process.env.FX0_REMOTE_IMAGES })
   assert.equal(validateDesignArtifactHtml(doc('<img src="https://example.com/a.png">')).ok, false)
+})
+
+test('images are prefetched from finished tags while the model writes, once each, without touching the preview', async () => {
+  const { prefetchRemoteImages } = await import('../lib/remote-image-cache.ts')
+  const forwarded = []
+  const inner = { delta: (id, chunk) => forwarded.push(chunk), end: (id) => forwarded.push(`end:${id}`), abort: () => forwarded.push('abort') }
+  const loads = []
+  const observer = prefetchRemoteImages(inner, async (url) => { loads.push(url); return PNG_URL })
+  const chunks = ['<!doctype html><html><head><style>.h{background:url(https://example.com/bg', '.png)}</style></head><body><img src="https://example.com/he',
+    'ro.png" alt=""><img src="https://example.com/hero.png">',
+    ...Array.from({ length: 14 }, (_, index) => `<img src="https://example.com/${index}.png">`), '</body></html>']
+  observer.delta('call', chunks[0])
+  assert.deepEqual(loads, [], 'an unfinished url( is never fetched')
+  observer.delta('call', chunks[1])
+  assert.deepEqual(loads, [], 'scans are spaced out while chunks arrive')
+  for (const chunk of chunks.slice(2)) observer.delta('call', chunk)
+  await observer.end('call')
+  assert.equal(loads.length, MAX_REMOTE_IMAGES)
+  assert.deepEqual(loads.slice(0, 3), ['https://example.com/bg.png', 'https://example.com/hero.png', 'https://example.com/0.png'])
+  assert.ok(!loads.some((url) => url.endsWith('/he') || url.endsWith('/bg')), 'no URL cut mid-chunk')
+  assert.deepEqual(forwarded, [...chunks, 'end:call'], 'the preview observer still sees every chunk')
+  await observer.abort()
+  assert.equal(forwarded.at(-1), 'abort')
+})
+
+test('prefetching scans again once the spacing has passed, and does nothing with remote images off', async (t) => {
+  const { prefetchRemoteImages } = await import('../lib/remote-image-cache.ts')
+  const loads = []
+  const observer = prefetchRemoteImages(undefined, async (url) => { loads.push(url); return PNG_URL })
+  observer.delta('call', '<img src="https://example.com/early.png">')
+  assert.deepEqual(loads, ['https://example.com/early.png'], 'the first finished tag starts at once')
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  observer.delta('call', '<img src="https://example.com/later.png">')
+  assert.deepEqual(loads, ['https://example.com/early.png', 'https://example.com/later.png'])
+
+  process.env.FX0_REMOTE_IMAGES = '0'
+  t.after(() => { delete process.env.FX0_REMOTE_IMAGES })
+  const inner = { delta() {} }
+  assert.equal(prefetchRemoteImages(inner), inner)
 })

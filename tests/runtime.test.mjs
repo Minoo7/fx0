@@ -27,7 +27,7 @@ export const assertGenerationCredential = (host) => {
 }
 export const gatewayFetch = () => async () => Response.json({})`)
 registerHooks({ resolve(specifier, context, next) {
-  if (context.parentURL?.includes('/lib/')) {
+  if (context.parentURL?.includes('/lib/') && !context.parentURL.includes('/node_modules/')) {
     const fake = { libfx: libfxUrl, './journal': journalUrl, './turn-credential': credentialUrl, './history': historyUrl, './gateway-session': gatewayUrl }[specifier]
     if (fake) return { url: fake, shortCircuit: true }
     if (specifier.startsWith('./') && !/\.[cm]?[jt]s$/.test(specifier)) return next(`${specifier}.ts`, context)

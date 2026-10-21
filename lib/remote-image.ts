@@ -30,13 +30,13 @@ export async function loadRemoteImage(url: string): Promise<string> {
  * the preview past it. `complete` is false when an image failed to load, so the
  * caller does not let a browser keep that copy.
  */
-export async function embedRemoteImages(html: string, load: (url: string) => Promise<string>): Promise<{ html: string; complete: boolean }> {
+export async function embedRemoteImages(html: string, load: (url: string) => Promise<string>): Promise<{ html: string; complete: boolean; images: number }> {
   const urls: string[] = []
   rewriteRemoteImages(html, (url: string) => {
     if (!urls.includes(url)) urls.push(url)
     return BLANK_IMAGE
   })
-  if (!urls.length) return { html, complete: true }
+  if (!urls.length) return { html, complete: true, images: 0 }
   const wanted = urls.slice(0, MAX_REMOTE_IMAGES)
   const loaded = await Promise.all(wanted.map((url) => load(url).catch(() => null)))
   const embedded = new Map<string, string>()
@@ -50,7 +50,7 @@ export async function embedRemoteImages(html: string, load: (url: string) => Pro
     total += imageBytes(image)
     return image
   })
-  return { html: rewritten, complete: loaded.every(Boolean) }
+  return { html: rewritten, complete: loaded.every(Boolean), images: wanted.length }
 }
 
 function imageBytes(image: string): number {

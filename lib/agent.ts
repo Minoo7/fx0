@@ -2,6 +2,7 @@ import type { FxAgent } from 'libfx'
 import { createTools, type AskQuestion, type ToolHost } from './tools'
 import { assertGenerationCredential } from './gateway-session'
 import { remoteImagesEnabled } from './design-artifact'
+import { prefetchRemoteImages } from './remote-image-cache'
 import { chatSession, durableAgent, runSubagent, type ChatRuntime } from './libfx-agent'
 import { project } from './projector'
 import {
@@ -73,6 +74,7 @@ const runtime: ChatRuntime = {
     await hydrateSession(host)
     return buildToolHost(host, turnId)
   },
+  watchDraft: prefetchRemoteImages,
 }
 
 // The process's durable agent. libfx runs each chat's turns through it, on

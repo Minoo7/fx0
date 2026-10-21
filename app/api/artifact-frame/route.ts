@@ -27,9 +27,11 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
   const readyToken = crypto.randomUUID()
   // Remote images are fetched here and embedded as data: URLs, so the design has no
   // network while it runs (lib/remote-image.ts). A copy missing an image is not kept.
+  const embedStarted = performance.now()
   const embedded = artifact != null && remoteImagesEnabled()
     ? await embedRemoteImages(artifact, cachedRemoteImage)
-    : { html: artifact, complete: true }
+    : { html: artifact, complete: true, images: 0 }
+  const embedMs = Math.round(performance.now() - embedStarted)
   const keep = etag != null && embedded.complete
   const prepared = embedded.html == null ? null : prepareDesignArtifactHtml(embedded.html, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
   // Every stored design passed validation, so this only guards against one that
@@ -95,7 +97,9 @@ document.querySelector('#frame-root').append(frame);
 </body>
 </html>`
   // Streamed: embedded images can take it past the buffered response limit.
-  const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(html)); controller.close() } })
+  const bytes = new TextEncoder().encode(html)
+  if (embedded.images) log(sessionId, 'artifact:images', { images: embedded.images, complete: embedded.complete, embedMs, bytes: bytes.length })
+  const body = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close() } })
   return new Response(body, {
     status: artifact == null ? 404 : 200,
     headers: {
