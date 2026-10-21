@@ -1,4 +1,4 @@
-import { DESIGN_ARTIFACT_EMBEDDED_CSP, DESIGN_FRAME_CSP, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
+import { DESIGN_ARTIFACT_EMBEDDED_CSP, DESIGN_FRAME_CSP, designFrameHtml, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
 import { embedRemoteImages } from '../../../lib/remote-image'
 import { cachedRemoteImage } from '../../../lib/remote-image-cache'
 import { readDesignArtifactAt } from '../../../lib/journal'
@@ -42,60 +42,7 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
       artifact != null ? 'This design could not be prepared for preview.'
         : past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
     }</p></body></html>`
-  const artifactUrl = `data:text/html;base64,${Buffer.from(preparedArtifact, 'utf8').toString('base64')}`
-  const serializedArtifactUrl = JSON.stringify(artifactUrl)
-  const serializedReadyToken = JSON.stringify(readyToken)
-  // The wrapper paints nothing of its own, so a design that has not painted yet
-  // shows the app's background. Sharing the app's color scheme keeps it
-  // transparent; a design that sets no background still gets the browser's white.
-  const html = `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Design artifact preview</title>
-<style>:root{color-scheme:light dark}html,body,#frame-root,iframe{width:100%;height:100%;margin:0;border:0;overflow:hidden}</style>
-</head>
-<body>
-<div id="frame-root"></div>
-<script>
-const artifact=${serializedArtifactUrl};
-const token=${serializedReadyToken};
-const frame=document.createElement('iframe');
-frame.title='Interactive design artifact';
-frame.setAttribute('sandbox','allow-scripts');
-frame.referrerPolicy='no-referrer';
-frame.setAttribute('credentialless','');
-let readySignals=0;
-let consumedSignals=0;
-let lastHeartbeat=Date.now();
-const restore=()=>{lastHeartbeat=Date.now();frame.src=artifact;};
-addEventListener('message',event=>{
-  if(event.source!==frame.contentWindow||event.data?.token!==token)return;
-  lastHeartbeat=Date.now();
-  if(event.data.type==='ready')readySignals++;
-  // The design paints in its own process, after this wrapper's load event; the app
-  // swaps a new revision on screen only once it has.
-  if(event.data.type==='painted')parent.postMessage({type:'fx0-artifact-painted'},location.origin);
-  // The design can only ask to open a link: its scripts can read the token and send
-  // this at any time. The app shows the address and opens it on the user's own click
-  // there. Recent user activation only filters out asks nobody prompted; it is not proof.
-  if(event.data.type==='open'&&typeof event.data.url==='string'&&navigator.userActivation?.isActive!==false){
-    parent.postMessage({type:'fx0-artifact-open',url:event.data.url},location.origin);
-  }
-});
-frame.addEventListener('load',()=>setTimeout(()=>{
-  if(readySignals>consumedSignals){consumedSignals=readySignals;return;}
-  restore();
-},100));
-setInterval(()=>{
-  if(document.visibilityState==='visible'&&Date.now()-lastHeartbeat>3000)restore();
-},500);
-frame.src=artifact;
-document.querySelector('#frame-root').append(frame);
-</script>
-</body>
-</html>`
+  const html = designFrameHtml(preparedArtifact, readyToken)
   // Streamed: embedded images can take it past the buffered response limit.
   const bytes = new TextEncoder().encode(html)
   if (embedded.images) log(sessionId, 'artifact:images', { images: embedded.images, complete: embedded.complete, embedMs, bytes: bytes.length })

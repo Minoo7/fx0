@@ -35,11 +35,11 @@ export const DESIGN_ARTIFACT_EMBEDDED_CSP = [
   "form-action 'none'",
 ].join('; ')
 
-// The wrapper that frames the design. Its data: frame inherits this policy on top of
+// The wrapper that frames the design. Its blob: frame inherits this policy on top of
 // the embedded one, so anything the design may load must be allowed here too.
 export const DESIGN_FRAME_CSP = [
   "default-src 'none'",
-  'frame-src data:',
+  'frame-src blob:',
   "script-src 'unsafe-inline'",
   "style-src 'unsafe-inline'",
   'img-src data:',
@@ -50,6 +50,68 @@ export const DESIGN_FRAME_CSP = [
   "form-action 'none'",
   "frame-ancestors 'self'",
 ].join('; ')
+
+// The page artifact-frame serves under DESIGN_FRAME_CSP: it frames the prepared design
+// and relays its heartbeat, paint and link messages to the app.
+export function designFrameHtml(preparedArtifact: string, readyToken: string): string {
+  // The design reaches its frame as a blob: URL the wrapper makes from this string,
+  // not as a data: URL: browsers refuse data: URLs past 2 MiB, which embedded images
+  // reach. A blob: document is local like data:, so it inherits this wrapper's CSP and
+  // resolves no relative URLs against fx0. "<" is escaped so the string cannot end the script.
+  const serializedArtifact = JSON.stringify(preparedArtifact).replace(/</g, '\\u003c')
+  const serializedReadyToken = JSON.stringify(readyToken)
+  // The wrapper paints nothing of its own, so a design that has not painted yet
+  // shows the app's background. Sharing the app's color scheme keeps it
+  // transparent; a design that sets no background still gets the browser's white.
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Design artifact preview</title>
+<style>:root{color-scheme:light dark}html,body,#frame-root,iframe{width:100%;height:100%;margin:0;border:0;overflow:hidden}</style>
+</head>
+<body>
+<div id="frame-root"></div>
+<script>
+const artifact=URL.createObjectURL(new Blob([${serializedArtifact}],{type:'text/html;charset=utf-8'}));
+const token=${serializedReadyToken};
+const frame=document.createElement('iframe');
+frame.title='Interactive design artifact';
+frame.setAttribute('sandbox','allow-scripts');
+frame.referrerPolicy='no-referrer';
+frame.setAttribute('credentialless','');
+let readySignals=0;
+let consumedSignals=0;
+let lastHeartbeat=Date.now();
+const restore=()=>{lastHeartbeat=Date.now();frame.src=artifact;};
+addEventListener('message',event=>{
+  if(event.source!==frame.contentWindow||event.data?.token!==token)return;
+  lastHeartbeat=Date.now();
+  if(event.data.type==='ready')readySignals++;
+  // The design paints in its own process, after this wrapper's load event; the app
+  // swaps a new revision on screen only once it has.
+  if(event.data.type==='painted')parent.postMessage({type:'fx0-artifact-painted'},location.origin);
+  // The design can only ask to open a link: its scripts can read the token and send
+  // this at any time. The app shows the address and opens it on the user's own click
+  // there. Recent user activation only filters out asks nobody prompted; it is not proof.
+  if(event.data.type==='open'&&typeof event.data.url==='string'&&navigator.userActivation?.isActive!==false){
+    parent.postMessage({type:'fx0-artifact-open',url:event.data.url},location.origin);
+  }
+});
+frame.addEventListener('load',()=>setTimeout(()=>{
+  if(readySignals>consumedSignals){consumedSignals=readySignals;return;}
+  restore();
+},100));
+setInterval(()=>{
+  if(document.visibilityState==='visible'&&Date.now()-lastHeartbeat>3000)restore();
+},500);
+frame.src=artifact;
+document.querySelector('#frame-root').append(frame);
+</script>
+</body>
+</html>`
+}
 
 function designArtifactBootstrap(readyToken?: string): string {
   // The sandbox grants no popups, so a clicked https link asks the app to open it
