@@ -38,7 +38,9 @@ export function prefetchRemoteImages(observer: DesignDraftObserver | undefined, 
       drafts.set(callId, draft)
       if (Date.now() - draft.scannedAt < SCAN_MS) return
       draft.scannedAt = Date.now()
-      scan(draft.html)
+      // Off the stream's path: the model's tokens reach libfx before this runs.
+      const html = draft.html
+      setImmediate(() => scan(html))
     },
     end(callId) {
       const draft = drafts.get(callId)

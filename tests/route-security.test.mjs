@@ -522,7 +522,7 @@ test('the wrapper\'s image route serves only URLs artifact-frame signed for this
   }
 })
 
-test('private attachments revalidate ownership and the manifest; a 304 never downloads Blob bytes', async () => {
+test('private attachments are kept five minutes, then revalidate ownership and the manifest; a 304 never downloads Blob bytes', async () => {
   process.env.SESSION_SECRET ??= 'deterministic-route-security-secret-32+'
   const { artifactImageSrc } = await import('../lib/artifact-image.ts')
   const handle = 'AbCdEfGhIjKlMnOpQrStUvWx'
@@ -534,13 +534,13 @@ test('private attachments revalidate ownership and the manifest; a 304 never dow
   const first = await get()
   assert.equal(first.status, 200)
   assert.equal(await first.text(), 'image')
-  assert.equal(first.headers.get('cache-control'), 'private, no-cache')
+  assert.equal(first.headers.get('cache-control'), 'private, max-age=300')
   const etag = first.headers.get('etag')
   assert.ok(etag)
   const kept = await get(etag)
   assert.equal(kept.status, 304)
   assert.equal(await kept.text(), '')
-  assert.equal(kept.headers.get('cache-control'), 'private, no-cache')
+  assert.equal(kept.headers.get('cache-control'), 'private, max-age=300')
   assert.equal(kept.headers.get('etag'), etag)
   assert.equal(s.blobGets, 1)
   s.assets.clear()

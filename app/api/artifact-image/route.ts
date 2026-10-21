@@ -17,11 +17,14 @@ export const GET = withSessionRoute(async (request, { id: sessionId }) => {
   if (!url) return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } })
   const asset = assetReference(url)
   const handle = asset?.slice('fx0-asset:'.length)
-  // Handles are immutable. A kept attachment must revalidate through ownership and
-  // the manifest, even after logout or deletion, but a 304 needs no Blob download.
+  // Handles are immutable. The browser may reuse an attachment for five minutes, so
+  // edits to a design do not wait on a round trip per image; after that it revalidates
+  // through ownership and the manifest, and a 304 needs no Blob download. Deleting the
+  // chat stops it at the next revalidation; only that same browser could still open
+  // the exact URL in the meantime.
   const etag = asset ? `"${asset}"` : null
   const cacheHeaders: Record<string, string> = etag
-    ? { 'cache-control': 'private, no-cache', etag }
+    ? { 'cache-control': 'private, max-age=300', etag }
     : { 'cache-control': 'private, max-age=86400' }
   let image: { bytes: Buffer; mimeType: string } | null
   try {
