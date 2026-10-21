@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
-import { DESIGN_ARTIFACT_EMBEDDED_CSP, prepareDesignArtifactHtml, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
+import { DESIGN_ARTIFACT_EMBEDDED_CSP, DESIGN_FRAME_CSP, prepareDesignArtifactHtml, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
 
 // Opt-in: runs real Chrome headless on this machine. Set CHROME_PATH for another browser binary.
 const CHROME = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
@@ -88,6 +88,52 @@ test('in Chrome, every published or stored design keeps its CSP in <head> and ca
       const expected = name.startsWith('control') ? { csp: 'none', frame: 'loaded' } : { csp: 'HEAD', frame: 'blocked' }
       assert.deepEqual(results[name], expected, name)
     }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The wrapper's own policy reaches the design's data: frame, so a design is rendered
+// here under both policies, as in production. An embedded image must load; a remote
+// one must still be refused by the policy, not merely fail to connect.
+const PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const imageDesign = `<!doctype html><html><head><title>design</title></head><body>
+<img id="embedded" alt="" src="data:image/png;base64,${PIXEL}">
+<script>
+const results = {}
+const report = (name, value) => { results[name] ??= value; parent.postMessage(results, '*') }
+addEventListener('securitypolicyviolation', (event) => {
+  if (event.blockedURI.startsWith('data:')) report('embedded', 'blocked')
+  if (event.blockedURI.startsWith('http:')) report('remote', 'blocked')
+})
+const embedded = document.getElementById('embedded')
+embedded.complete && embedded.naturalWidth ? report('embedded', 'loaded') : embedded.addEventListener('load', () => report('embedded', 'loaded'))
+const remote = new Image()
+remote.onload = () => report('remote', 'loaded')
+remote.src = 'http://127.0.0.1:9/pixel.png'
+</script></body></html>`
+
+test('in Chrome, a published design shows embedded images inside the wrapper and still refuses remote ones', async () => {
+  assert.ok(existsSync(CHROME), `Chrome not found at ${CHROME}; set CHROME_PATH`)
+  const dir = await mkdtemp(join(tmpdir(), 'fx0-design-frame-csp-'))
+  try {
+    const url = `data:text/html;base64,${Buffer.from(published('image', imageDesign)).toString('base64')}`
+    const frameCsp = DESIGN_FRAME_CSP.replace(/; frame-ancestors[^;]*/, '')
+    const file = join(dir, 'page.html')
+    await writeFile(file, `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${frameCsp}"><title>frame CSP</title></head><body><pre id="out">{}</pre><script>
+addEventListener('message', ({ data }) => { if (!data.token) document.getElementById('out').textContent = JSON.stringify(data) })
+const frame = document.createElement('iframe')
+frame.setAttribute('sandbox', 'allow-scripts')
+frame.setAttribute('credentialless', '')
+frame.src = ${JSON.stringify(url)}
+document.body.append(frame)
+</script></body></html>`)
+    const { stdout } = await promisify(execFile)(CHROME, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+      `--user-data-dir=${join(dir, 'profile')}`, '--virtual-time-budget=5000', '--dump-dom', pathToFileURL(file).href,
+    ], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
+    const results = JSON.parse(stdout.match(/<pre id="out">([^<]*)<\/pre>/)[1])
+    assert.deepEqual(results, { embedded: 'loaded', remote: 'blocked' })
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

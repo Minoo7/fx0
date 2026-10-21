@@ -17,6 +17,22 @@ export const DESIGN_ARTIFACT_EMBEDDED_CSP = [
   "form-action 'none'",
 ].join('; ')
 
+// The wrapper that frames the design. Its data: frame inherits this policy on top of
+// the embedded one, so anything the design may load must be allowed here too.
+export const DESIGN_FRAME_CSP = [
+  "default-src 'none'",
+  'frame-src data:',
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  'img-src data:',
+  'font-src data:',
+  'media-src data:',
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
+].join('; ')
+
 function designArtifactBootstrap(readyToken?: string): string {
   // The sandbox grants no popups, so a clicked https link asks the app to open it
   // (see app/api/artifact-frame): the app shows the address and opens it only on the
