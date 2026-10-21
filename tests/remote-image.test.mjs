@@ -4,7 +4,7 @@ import https from 'node:https'
 import dns from 'node:dns/promises'
 import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
-import { BLANK_IMAGE, DESIGN_ARTIFACT_EMBEDDED_CSP, remoteImageUrl, rewriteRemoteImages, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
+import { BLANK_IMAGE, DESIGN_ARTIFACT_EMBEDDED_CSP, MAX_DESIGN_ARTIFACT_BYTES, remoteImageUrl, rewriteRemoteImages, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
 import { embedRemoteImages, loadRemoteImage, MAX_REMOTE_IMAGES, MAX_REMOTE_IMAGES_TOTAL_BYTES } from '../lib/remote-image.ts'
 import { sniffImageType } from '../lib/image-sniff.ts'
 import { MAX_IMAGE_FETCH_BYTES } from '../lib/public-fetch.ts'
@@ -107,6 +107,21 @@ test('the size budget counts every place an image is written, so repeating one c
   const tiny = await embedRemoteImages(many, async () => PNG_URL)
   assert.equal(tiny.html.split(PNG_URL).length - 1, 20_000)
   assert.ok(performance.now() - started < 2_000, 'rewriting grows with the output, not with the number of edits')
+})
+
+test('preparing a design stays linear in its size, however its CSS is shaped', () => {
+  const fill = (unit) => unit.repeat(Math.floor((MAX_DESIGN_ARTIFACT_BYTES - 200) / unit.length))
+  for (const [name, html] of [
+    ['many style attributes', doc(fill('<b style="a">x</b>'))],
+    ['unclosed url( in style attributes', doc(fill('<b style="url(">'))],
+    ['unclosed url( in a style block', doc('', `<style>${fill('url(')}</style>`)],
+    ['unclosed quoted url( in a style block', doc('', `<style>${fill('url("')}</style>`)],
+  ]) {
+    assert.equal(validateDesignArtifactHtml(html).ok, true, name)
+    const started = performance.now()
+    rewriteRemoteImages(html, () => PNG_URL)
+    assert.ok(performance.now() - started < 500, `${name}: ${Math.round(performance.now() - started)} ms`)
+  }
 })
 
 test('a failed image is blank and the copy is marked incomplete; a design without remote images is untouched', async () => {

@@ -332,6 +332,7 @@ function validateTag(tag: HtmlTag, remote: boolean): string | null {
 export function rewriteRemoteImages(html: string, embed: (url: string) => string): string {
   const edits: (SourceRange & { text: string })[] = []
   const image = (url: string) => embeddedImage(embed(url))
+  const lower = html.toLowerCase()
   for (const tag of parseOpeningTags(html)) {
     for (const [name, range] of tag.valueRanges) {
       const raw = tag.attributes.get(name)!
@@ -345,11 +346,11 @@ export function rewriteRemoteImages(html: string, embed: (url: string) => string
       } else if (name === 'style') {
         const quoted = html[range.start] === '"' || html[range.start] === "'"
         const inner = quoted ? { start: range.start + 1, end: range.end - 1 } : range
-        for (const edit of cssUrlEdits(html, inner, true)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
+        for (const edit of cssUrlEdits(html, lower, inner, true)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
       }
     }
     if (tag.content) {
-      for (const edit of cssUrlEdits(html, tag.content, false)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
+      for (const edit of cssUrlEdits(html, lower, tag.content, false)) edits.push({ ...edit, text: `url(${image(edit.url)})` })
     }
   }
   // One pass, so the cost grows with the output, not with the number of edits.
@@ -385,10 +386,20 @@ const STYLE_QUOTES = ['"', "'"]
 
 // The url() tokens in a CSS range whose argument is a remote image URL, skipping
 // comments and strings. An argument with a CSS escape is left alone (and stays blocked).
-function cssUrlEdits(source: string, range: SourceRange, inAttribute: boolean): (SourceRange & { url: string })[] {
+// `lower` is the whole source lowercased once by the caller; every scan stays inside `range`.
+function cssUrlEdits(source: string, lower: string, range: SourceRange, inAttribute: boolean): (SourceRange & { url: string })[] {
   const quotes = inAttribute ? ATTRIBUTE_QUOTES : STYLE_QUOTES
-  const lower = source.toLowerCase()
   const quoteAt = (index: number) => quotes.find((quote) => lower.startsWith(quote, index))
+  // The next ")" at or after a position, remembered: positions only grow, so the
+  // whole range is searched once however many url( tokens never close.
+  let nextClose = -1
+  const closeAfter = (index: number) => {
+    if (nextClose < index) {
+      nextClose = source.indexOf(')', index)
+      if (nextClose < 0 || nextClose >= range.end) nextClose = Number.POSITIVE_INFINITY
+    }
+    return nextClose
+  }
   const edits: (SourceRange & { url: string })[] = []
   let index = range.start
   while (index < range.end) {
@@ -403,7 +414,7 @@ function cssUrlEdits(source: string, range: SourceRange, inAttribute: boolean): 
       continue
     }
     if (lower.startsWith('url(', index) && !/[\w-]/.test(lower[index - 1] ?? '')) {
-      const token = cssUrlToken(source, lower, index + 4, range.end, quoteAt)
+      const token = cssUrlToken(source, lower, index + 4, range.end, quoteAt, closeAfter)
       if (token) {
         const value = (inAttribute ? decodeAttribute(token.value) : token.value).trim()
         const url = value.includes('\\') ? null : remoteImageUrl(value)
@@ -426,7 +437,7 @@ function stringEnd(lower: string, index: number, quote: string, limit: number): 
   return limit
 }
 
-function cssUrlToken(source: string, lower: string, index: number, limit: number, quoteAt: (index: number) => string | undefined) {
+function cssUrlToken(source: string, lower: string, index: number, limit: number, quoteAt: (index: number) => string | undefined, closeAfter: (index: number) => number) {
   while (index < limit && /\s/.test(source[index])) index++
   const quote = quoteAt(index)
   let value: string
@@ -436,8 +447,8 @@ function cssUrlToken(source: string, lower: string, index: number, limit: number
     index = close
     while (index < limit && /\s/.test(source[index])) index++
   } else {
-    const close = source.indexOf(')', index)
-    if (close < 0 || close >= limit) return null
+    const close = closeAfter(index)
+    if (close >= limit) return null
     value = source.slice(index, close)
     index = close
   }
