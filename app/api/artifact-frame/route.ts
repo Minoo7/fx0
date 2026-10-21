@@ -1,4 +1,4 @@
-import { DESIGN_ARTIFACT_EMBEDDED_CSP, prepareDesignArtifactHtml } from '../../../lib/design-artifact'
+import { DESIGN_ARTIFACT_EMBEDDED_CSP, DESIGN_FRAME_CSP, prepareDesignArtifactHtml } from '../../../lib/design-artifact'
 import { readDesignArtifactAt } from '../../../lib/journal'
 import { readGeneration } from '../../../lib/history'
 import { withSessionRoute } from '../../../lib/route-auth'
@@ -33,16 +33,6 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
         : past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
     }</p></body></html>`
   const artifactUrl = `data:text/html;base64,${Buffer.from(preparedArtifact, 'utf8').toString('base64')}`
-  const csp = [
-    "default-src 'none'",
-    'frame-src data:',
-    "script-src 'unsafe-inline'",
-    "style-src 'unsafe-inline'",
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "frame-ancestors 'self'",
-  ].join('; ')
   const serializedArtifactUrl = JSON.stringify(artifactUrl)
   const serializedReadyToken = JSON.stringify(readyToken)
   // The wrapper paints nothing of its own, so a design that has not painted yet
@@ -101,7 +91,7 @@ document.querySelector('#frame-root').append(frame);
     headers: {
       'cache-control': etag ? 'private, no-cache' : 'private, no-store',
       ...(etag ? { etag } : {}),
-      'content-security-policy': csp,
+      'content-security-policy': DESIGN_FRAME_CSP,
       'content-type': 'text/html; charset=utf-8',
       'permissions-policy':
         'accelerometer=(), camera=(), clipboard-read=(), clipboard-write=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=()',
