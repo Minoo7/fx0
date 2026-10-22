@@ -55,12 +55,15 @@ try {
     await setTimeout(100)
   }
   assert(listening, 'identity proxy must start and deny unauthenticated access')
-  const auth = { authorization: `Basic ${Buffer.from(`fx0:${secret}`).toString('base64')}` }
-  for (const untrusted of [{ 'x-tsdproxy-username': 'spoof@example.invalid' }, auth]) {
-    assert.equal((await fetch('http://127.0.0.1:3001/api/auth/me', { headers: untrusted })).status, 403)
+  const authenticatedUrl = `http://127.0.0.1:3001/api/auth/me?fx0_proxy_key=${secret}`
+  for (const [url, untrusted] of [
+    ['http://127.0.0.1:3001/api/auth/me', { 'x-tsdproxy-username': 'spoof@example.invalid' }],
+    [authenticatedUrl, {}],
+  ]) {
+    assert.equal((await fetch(url, { headers: untrusted })).status, 403)
   }
-  const identity = await fetch('http://127.0.0.1:3001/api/auth/me', { headers: {
-    ...auth, 'x-tsdproxy-username': 'ci@example.invalid',
+  const identity = await fetch(authenticatedUrl, { headers: {
+    'x-tsdproxy-username': 'ci@example.invalid',
     'tailscale-user-login': 'spoof@example.invalid',
   } })
   assert.equal(identity.status, 200)

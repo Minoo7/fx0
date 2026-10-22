@@ -4,9 +4,10 @@ import { timingSafeEqual } from 'node:crypto'
 
 const secret = process.env.FX0_PROXY_SECRET ?? await readFile(`${process.env.FX0_SECRETS_DIR ?? '/secrets'}/proxy`, 'utf8')
 const upstream = process.env.FX0_UPSTREAM ?? 'http://app:3000'
-const authorization = Buffer.from(`Basic ${Buffer.from(`fx0:${secret}`).toString('base64')}`)
+const authorization = Buffer.from(secret)
 createServer((incoming, outgoing) => {
-  const received = Buffer.from(incoming.headers.authorization ?? '')
+  const url = new URL(incoming.url, 'http://localhost')
+  const received = Buffer.from(url.searchParams.get('fx0_proxy_key') ?? '')
   if (received.length !== authorization.length || !timingSafeEqual(received, authorization) ||
     !incoming.headers['x-tsdproxy-username']) {
     outgoing.writeHead(403).end('Tailscale user identity required')
@@ -18,7 +19,8 @@ createServer((incoming, outgoing) => {
     'tailscale-user-profile-pic': incoming.headers['x-tsdproxy-profilepicurl'] ?? '',
     'x-forwarded-host': incoming.headers.host, 'x-forwarded-proto': 'https' }
   delete headers.authorization
-  const forwarded = request(upstream, { path: incoming.url, method: incoming.method, headers }, response => {
+  url.searchParams.delete('fx0_proxy_key')
+  const forwarded = request(upstream, { path: url.pathname + url.search, method: incoming.method, headers }, response => {
     outgoing.writeHead(response.statusCode ?? 502, response.headers)
     response.pipe(outgoing)
   })

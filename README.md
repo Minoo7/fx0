@@ -15,9 +15,10 @@ Set `TS_AUTHKEY` to a Tailscale auth key in Environment, or complete the device
 login URL in the Tailscale container's logs. Enable Serve in the tailnet.
 Route `https://fx0.planasolutions.ai` through TSDProxy to the sidecar's tailnet
 port 8080. Use a DNS-only record pointing to the shared private proxy. The target
-URL must include Basic credentials `fx0:<proxy secret>`, with the secret read
+URL must include `?fx0_proxy_key=<proxy secret>`, with the secret read
 privately from `/secrets/proxy` in the proxy container. TSDProxy supplies the
-authenticated user's identity headers. Keep its target URL private.
+authenticated user's identity headers. The loopback proxy removes that key
+before forwarding requests to the app. Keep its target URL private.
 Do not expose an application port or enable Funnel. No Vercel login is needed.
 
 Alternatively, open **Model providers** from the account menu. Pi supplies each
