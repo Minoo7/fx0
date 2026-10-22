@@ -19,6 +19,7 @@ export default function ProviderSettings() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [query, setQuery] = useState('')
+  const [connectionFilter, setConnectionFilter] = useState<'all' | 'connected' | 'not-connected'>('all')
   const [notice, setNotice] = useState('')
   const load = async () => {
     const response = await fetch('/api/providers', { cache: 'no-store' })
@@ -65,10 +66,20 @@ export default function ProviderSettings() {
     } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
-  const visibleProviders = providers.filter(provider => terms.every(term => `${provider.name} ${provider.id}`.toLowerCase().includes(term)))
+  const visibleProviders = providers.filter(provider =>
+    (connectionFilter === 'all' || provider.configured === (connectionFilter === 'connected')) &&
+    terms.every(term => `${provider.name} ${provider.id}`.toLowerCase().includes(term)))
   return <>
     <label htmlFor="provider-search" className="mt-6 block text-sm">Search providers</label>
     <input id="provider-search" type="search" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search by provider name…" autoComplete="off" className="mt-2 w-full border border-border bg-background p-2" />
+    <fieldset className="mt-3 min-w-0">
+      <legend className="text-sm">Connection status</legend>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2 text-sm">
+        <label className="flex items-center gap-2"><input type="radio" name="provider-connection-filter" value="all" checked={connectionFilter === 'all'} onChange={() => setConnectionFilter('all')} />All</label>
+        <label className="flex items-center gap-2"><input type="radio" name="provider-connection-filter" value="connected" checked={connectionFilter === 'connected'} onChange={() => setConnectionFilter('connected')} />Connected</label>
+        <label className="flex items-center gap-2"><input type="radio" name="provider-connection-filter" value="not-connected" checked={connectionFilter === 'not-connected'} onChange={() => setConnectionFilter('not-connected')} />Not connected</label>
+      </div>
+    </fieldset>
     <p role="status" className="mt-2 text-sm text-foreground-secondary">{visibleProviders.length} of {providers.length} providers{notice && ` · ${notice}`}</p>
     {error && <p role="alert" className="my-4 text-red-500">{error}</p>}
     {login && <section className="my-6 border border-border p-4" aria-label="Provider connection">
@@ -92,7 +103,7 @@ export default function ProviderSettings() {
         setLogin(null); setAnswer('')
       }}>{login.status === 'pending' ? 'Cancel' : 'Close'}</button>
     </section>}
-    {providers.length > 0 && visibleProviders.length === 0 && <p className="my-6">No providers match your search.</p>}
+    {providers.length > 0 && visibleProviders.length === 0 && <p className="my-6">No providers match your search and connection status filters.</p>}
     <ul aria-label="Model providers" className="mt-6 divide-y divide-border">{visibleProviders.map(provider => <li key={provider.id} className="py-4">
       <div className="flex flex-wrap items-center gap-3"><h2 className="font-medium">{provider.name}</h2>
         <span className="text-xs text-foreground-secondary">{provider.configured ? 'Connected' : 'Not connected'} · {provider.models} models</span></div>
