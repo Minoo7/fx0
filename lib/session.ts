@@ -4,7 +4,7 @@ import { sanitizeSessionId } from './session-id'
 import type { StreamItem } from './events'
 
 const KEY = '__fx0Sessions'
-export const DEFAULT_MODEL = 'anthropic/claude-opus-5.5-fast'
+export const DEFAULT_MODEL = 'anthropic/claude-sonnet-4-5'
 
 // libfx leaves step budgets to the host. Without this cap, a turn or subagent that
 // keeps calling tools would run, and bill, until the function times out. The
@@ -36,7 +36,7 @@ export interface SessionState {
   id: string
   // The signed-in caller's credential, bound by the route; the prompt route
   // stores it as the chat's turn credential.
-  gatewaySession: import('./secure-session').SessionData | null
+  ownerId: string | null
   // Set while this process deletes the chat.
   busy: boolean
   emitTail: Promise<void>
@@ -52,7 +52,7 @@ export interface SessionState {
 function createState(id: string): SessionState {
   return {
     id,
-    gatewaySession: null,
+    ownerId: null,
     busy: false,
     emitTail: Promise.resolve(),
     toolSeq: 0,
@@ -94,7 +94,7 @@ export function effectiveFast(host: SessionState): boolean {
 }
 
 export function effectiveEffort(host: SessionState): string {
-  return host.preferredEffort ?? 'low'
+  return host.preferredEffort ?? 'default'
 }
 
 // Transcript items a tool writes directly (questions, status), in order per chat.

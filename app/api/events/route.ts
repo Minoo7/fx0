@@ -1,5 +1,5 @@
 import { createSessionEventStream } from '../../../lib/event-stream'
-import { followChat, renewTurnCredential } from '../../../lib/agent'
+import { followChat } from '../../../lib/agent'
 import { withSessionRoute } from '../../../lib/route-auth'
 
 export const maxDuration = 800
@@ -16,7 +16,6 @@ export const GET = withSessionRoute(async (request, { id: sessionId, host }) => 
     Number.isFinite(lastEventId) ? lastEventId : 0,
   )
   // Best effort; the token a turn already holds keeps working until it expires.
-  void renewTurnCredential(host).catch(() => {})
   const stream = createSessionEventStream(sessionId, {
     afterSeq,
     maxLifetimeMs: STREAM_LIFETIME_MS,

@@ -203,7 +203,7 @@ function Sidebar({
 
       {/* pb-4 centers this row on the composer's toolbar beside it (its padding is 8px + 8px). */}
       <div className="pb-4 pl-3 pr-3 pt-2">
-        {account ?? <AccountMenu sidebar user={user} team={team} onSignIn={onSignIn} onSignOut={onSignOut} signOutStatus={signOutStatus} onSwitchTeam={onSwitchTeam} onGrantTeams={onGrantTeams} />}
+        {account ?? <AccountMenu sidebar user={user} />}
       </div>
     </aside>
   )

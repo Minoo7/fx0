@@ -1,0 +1,41 @@
+name: Selfhost
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: fx0
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 20
+      redis:
+        image: redis:7-bookworm
+        ports: ['6379:6379']
+    env:
+      DATABASE_URL: postgresql://postgres@127.0.0.1:5432/fx0
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.8
+      - run: bun install --frozen-lockfile
+      - run: bun run db:migrate
+      - run: bun run typecheck
+      - run: bun test tests/selfhost.test.mjs
+      - run: bun run test:journal:integration
+      - run: bun run build
+      - run: docker compose config --quiet
+      - run: docker build -t fx0-selfhost:ci .
+      - run: docker compose up -d app
+      - run: docker compose exec -T app node scripts/verify-selfhost.mjs
+      - if: failure()
+        run: docker compose logs --tail=40 app postgres redis init
+      - if: always()
+        run: docker compose down -v

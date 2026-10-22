@@ -1,21 +1,12 @@
 import type { FxAgent, FxSession } from 'libfx'
 import { createTools, type AskQuestion, type ToolHost } from './tools'
-import { assertGenerationCredential } from './gateway-session'
+import { assertModelAccess } from './pi-models'
+import { effectiveModel } from './session'
 import { remoteImagesEnabled } from './design-artifact'
 import { prefetchRemoteImages } from './remote-image-cache'
 import { deleteDesignAssets, type PendingDesignAssets } from './design-assets'
 import { chatSession, durableAgent, runSubagent, type ChatRuntime } from './libfx-agent'
 import { project } from './projector'
-import {
-  dropChatCredential,
-  dropLoginCredentials,
-  readTurnCredential,
-  renewLatestCredential,
-  saveTrialCredential,
-  saveTurnCredential,
-} from './turn-credential'
-import type { TrialCredential } from './trial'
-import type { SessionData } from './secure-session'
 import {
   answerActiveQuestion,
   claimSessionCleanup,
@@ -158,11 +149,6 @@ function capabilitySearch(host: SessionState, query: string) {
       kind: 'tool',
       description: (t.description ?? '').slice(0, 160),
     })),
-    {
-      name: 'web_search',
-      kind: 'tool',
-      description: 'Gateway-executed public web search; no separate provider key required.',
-    },
   ]
   const words = query.toLowerCase().split(/\s+/).filter(Boolean)
   return catalog.filter((c) => words.some((w) => `${c.name} ${c.description}`.toLowerCase().includes(w))).slice(0, 10)
@@ -222,9 +208,9 @@ function promptStages() {
 }
 
 /** Throws unless this prompt can be billed: its sponsored funding, or a usable credential. */
-export function assertPromptFunding(host: SessionState, funding?: TrialCredential, submitter?: SessionData): void {
-  const credential = submitter ?? host.gatewaySession
-  if (!funding) assertGenerationCredential({ ...host, gatewaySession: credential && { ...credential } })
+export async function assertPromptFunding(host: SessionState, model = effectiveModel(host)): Promise<void> {
+  if (!host.ownerId) throw new Error('Chat owner required')
+  await assertModelAccess(model)
 }
 
 export async function submitPrompt(
@@ -235,17 +221,13 @@ export async function submitPrompt(
   images?: PromptImage[],
   initial?: InitialGeneration,
   previews?: string[],
-  funding?: TrialCredential,
-  submitter?: SessionData,
   assets?: PendingDesignAssets,
 ): Promise<{ id: number; seq: number; trialChat: boolean }> {
   // A turn needs at least 15 minutes left on the credential it bills; libfx runs
   // it, including a crash recovery, within that.
-  const credential = submitter ?? host.gatewaySession
-  const sender = credential && { ...credential }
-  assertPromptFunding(host, funding, submitter)
+  await assertPromptFunding(host, initial?.preferredModel ?? effectiveModel(host))
   const stages = promptStages()
-  const submitted = await journalPrompt(host.id, { author, text, clientId, images, previews }, initial, !!funding)
+  const submitted = await journalPrompt(host.id, { author, text, clientId, images, previews }, initial, false)
   stages.mark('journal')
   log(host.id, 'prompt:submitted', { id: submitted.id, clientId, imageCount: images?.length ?? 0, idle: submitted.idle })
   const id = submitted.id
@@ -253,12 +235,9 @@ export async function submitPrompt(
   try {
     // Pinned before libfx sees the message: whether it starts a turn or joins
     // the running one, no turn can run without its funding record.
-    if (funding) await saveTrialCredential(host.id, funding, id)
-    else await saveTurnCredential(host.id, sender!, id)
-    stages.mark('credential')
     const stored = await hydrateSession(host)
     stages.mark('hydrate')
-    const { session } = await chatSession(agent(), host, stored?.libfxSessionId ?? null, agentInstructions(host), id, !!funding)
+    const { session } = await chatSession(agent(), host, stored?.libfxSessionId ?? null, agentInstructions(host), id)
     stages.mark('bind')
     // Each attached image, in order, as the design can name it.
     const placeable = assets?.handles.length
@@ -301,14 +280,6 @@ export async function submitPrompt(
 // A token the same login renewed for the same team reaches that login's running
 // and queued turns, each billing the team its message chose. Another login or
 // team bills only from its own next prompt.
-export async function renewTurnCredential(host: SessionState): Promise<void> {
-  const session = host.gatewaySession
-  if (!session) return
-  const stored = await readTurnCredential(host.id)
-  if (stored?.loginId === session.loginId && stored.teamId === session.teamId && session.expiresAt > stored.expiresAt) {
-    await renewLatestCredential(host.id, session)
-  }
-}
 
 const followers = new Map<string, Promise<void>>()
 
@@ -465,12 +436,11 @@ export async function deleteDesignSession(host: SessionState): Promise<boolean> 
       // drops its own records, its credential and the session mapping.
       if (!await finishSessionCleanup(host.id, token, stored?.libfxSessionId ?? null)) return false
       claimed = false // finish atomically consumes the cleanup lease.
-      await dropChatCredential(host.id)
       // The manifest went with the Redis keys, so no image is served from here on;
       // removing the files themselves is best effort and never fails the deletion.
       await deleteDesignAssets(host.id).catch((error) => log(host.id, 'assets:delete-failed', { error: errorText(error) }))
     }
-    host.gatewaySession = null
+    host.ownerId = null
     host.toolOutputs.clear()
     if (registry().get(host.id) === host) registry().delete(host.id)
     return true
@@ -497,16 +467,6 @@ export async function deleteDesignSession(host: SessionState): Promise<boolean> 
  * when it lands, which may already be another login's, so only the credentials
  * fence this login's turns.
  */
-export async function cancelUserRuntime(userId: string, loginId?: string): Promise<void> {
-  for (const host of registry().values()) {
-    if (host.gatewaySession?.userId === userId && (loginId === undefined || host.gatewaySession.loginId === loginId)) host.gatewaySession = null
-  }
-  // A session without a login id never stored a chat credential.
-  if (!loginId) return
-  for (const { chatId, turns, latest } of await dropLoginCredentials(loginId)) {
-    log(chatId, 'signout:credentials', { turns, latest })
-  }
-}
 
 export async function debugState(host: SessionState) {
   const [stored, view, active, question, seq, projected] = await Promise.all([

@@ -37,14 +37,17 @@ function decodeSessionCursor(value?: string | null): SessionCursor | null {
 
 // Neon HTTP has no request-owned connection or pool to drain. Never issue BEGIN
 // across HTTP calls: writes needing atomicity are expressed as one SQL statement.
+let pool: import('pg').Pool | undefined
 export async function withAccountDatabase<T>(work: (query: AccountQuery) => Promise<T>, { timeoutMs }: { timeoutMs?: number } = {}): Promise<T> {
   if (typeof window !== 'undefined') throw new Error('Accounts are server only')
   const connectionString = process.env.DATABASE_URL
   if (!connectionString) throw new Error('DATABASE_URL is required')
-  const { neon } = await import('@neondatabase/serverless')
-  const sql = neon(connectionString)
-  return work(async (text, values = []) => await sql.query(text, values,
-    timeoutMs ? { fetchOptions: { signal: AbortSignal.timeout(timeoutMs) } } : undefined) as Record<string, unknown>[])
+  const { Pool } = await import('pg')
+  pool ??= new Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000 })
+  return work(async (text, values = []) => {
+    const config = { text, values, query_timeout: timeoutMs }
+    return (await pool!.query(config)).rows
+  })
 }
 
 export function isNewSessionId(id: unknown): id is string {
@@ -89,10 +92,7 @@ export function createAccountStore(query: AccountQuery) {
     // changes only when its guest cookie is claimed by a verified login.
     // billing_team_id records the team the chat started with; each
     // turn records the team it actually billed (fx0_turns.billing_team_id).
-    async reserveSession(user: AccountUser, sessionId: string, billingTeamId: string): Promise<void> {
-      if (typeof billingTeamId !== 'string' || !billingTeamId.startsWith('team_')) {
-        throw new AuthError(403, 'Grant a Vercel team with AI Gateway access')
-      }
+    async reserveSession(user: AccountUser, sessionId: string, billingTeamId: string | null): Promise<void> {
       return reserve(user, sessionId, billingTeamId)
     },
     async reserveGuestSession(user: AccountUser, sessionId: string): Promise<void> {
@@ -143,7 +143,7 @@ export async function assertSessionOwner(userId: string, sessionId: string): Pro
   return withAccountDatabase((query) => createAccountStore(query).assertSessionOwner(userId, sessionId))
 }
 
-export async function reserveSession(user: AccountUser, sessionId: string, billingTeamId: string): Promise<void> {
+export async function reserveSession(user: AccountUser, sessionId: string, billingTeamId: string | null): Promise<void> {
   return withAccountDatabase((query) => createAccountStore(query).reserveSession(user, sessionId, billingTeamId))
 }
 

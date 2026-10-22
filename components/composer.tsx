@@ -55,13 +55,6 @@ const PROMPT_KEY = 'fx0:prompt'
 const RESTORE_PROMPT = `try{var t=document.getElementById('prompt-input'),v=sessionStorage.getItem(${JSON.stringify(PROMPT_KEY)});if(t&&v&&!t.value)t.value=v;if(t&&!matchMedia('(pointer: coarse)').matches){t.focus({preventScroll:true});t.setSelectionRange(t.value.length,t.value.length)}document.addEventListener('keydown',function(e){var p=document.getElementById('prompt-input'),a=e.target,n=a&&a.tagName;if(!p||window.__fx0Hydrated||e.isComposing)return;if(a===p){if(e.key==='Enter'&&!e.shiftKey&&p.value.trim()){e.preventDefault();p.__fx0Submit=true}return}if(e.metaKey||e.ctrlKey||e.altKey||e.key.length!==1||(a&&a.isContentEditable)||n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||document.querySelector('[role="dialog"][data-state="open"]'))return;if(p!==document.activeElement)p.focus()})}catch(e){}`
 
 const DEFAULT_EFFORT_LABEL = 'default'
-let modelCatalogPromise: Promise<{
-  models?: string[]
-  defaultModel?: string
-  efforts?: Record<string, string[]>
-  fast?: string[]
-  featured?: string[]
-}> | null = null
 
 // Ids are punctuated inconsistently, so "opus 45" has to match "claude-opus-4.5".
 const squash = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -82,11 +75,10 @@ function rememberedPreference(): { model: string; effort: string; fast: boolean 
 }
 
 function loadModelCatalog() {
-  modelCatalogPromise ??= fetchUi('/api/models').then((response) => {
+  return fetchUi('/api/models', { cache: 'no-store' }).then((response) => {
     if (!response.ok) throw new Error(`Model catalog failed with ${response.status}`)
     return response.json()
   })
-  return modelCatalogPromise
 }
 
 
@@ -537,16 +529,20 @@ export default function Composer({
   }, [sessionId, persistSettings])
 
   useEffect(() => {
+    let active = true
     void loadModelCatalog()
       .then((catalog) => {
+        if (!active) return
         setModels(catalog.models ?? [])
         setEfforts(catalog.efforts ?? {})
         setFastModels(catalog.fast ?? [])
         setFeaturedModels(catalog.featured ?? [])
-        setDefaultModel(catalog.defaultModel ?? initialGeneration.defaultModel)
+        setDefaultModel(catalog.defaultModel ?? '')
+        if (sessionId === 'draft') setModel(current => catalog.models?.includes(current) ? current : catalog.defaultModel ?? '')
       })
-      .catch(() => setModels(initialGeneration.defaultModel ? [initialGeneration.defaultModel] : []))
-  }, [])
+      .catch(() => { if (active) setModels([]) })
+    return () => { active = false }
+  }, [modelPickerOpen])
 
   useEffect(() => {
     if (!persistSettings || sessionId === 'draft') return
@@ -1102,7 +1098,7 @@ export default function Composer({
                     </button>
                   ))}
                   {filteredModels.length === 0 && (
-                    <p className="px-2.5 py-5 text-center text-sm text-muted-foreground">no matching models.</p>
+                    <p className="px-2.5 py-5 text-center text-sm text-muted-foreground">{models.length ? 'no matching models.' : 'connect a provider to see available models.'}</p>
                   )}
                 </div>
                 {!normalizedModelQuery && listedModels.length > filteredModels.length && (

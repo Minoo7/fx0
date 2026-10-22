@@ -13,7 +13,6 @@ import {
   type TurnWork,
 } from './journal'
 import { recordGeneration, recordTurn, type TurnRecord } from './history'
-import { readExecutionFunding } from './turn-credential'
 import { effectiveEffort, effectiveFast, effectiveModel, INSTANCE, log, type SessionState } from './session'
 import type { StreamItem } from './events'
 import { TRIAL_MODEL } from './trial-policy'
@@ -129,16 +128,13 @@ function turnSettings(host: SessionState, sponsored: boolean): TurnSettings {
 // can mark it running in the same script (see projectEvents). If these reads
 // fail, nothing commits and the next follower projects the lines again.
 async function readTurnStart(host: SessionState, id: number, input: string | undefined): Promise<TurnStart> {
-  const [funding] = await Promise.all([readExecutionFunding(host.id, id), readSettings(host)])
-  const credential = funding.ok ? funding.credential : null
-  const sponsored = !!credential && 'kind' in credential
+  await readSettings(host)
   return {
     id,
     startedAt: Date.now(),
-    billingTeamId: credential?.teamId ?? null,
-    ...(sponsored ? { sponsored: true as const } : {}),
+    billingTeamId: null,
     prompt: promptText(input),
-    settings: turnSettings(host, sponsored),
+    settings: turnSettings(host, false),
   }
 }
 

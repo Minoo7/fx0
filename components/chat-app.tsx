@@ -1707,9 +1707,9 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     </Suspense>
   )
   const accountRegion = (sidebarAccount = false, side?: 'top' | 'bottom') => (
-    <Suspense fallback={<AccountMenu user={accountUser} sidebar={sidebarAccount} side={side} team={team} onSignOut={() => void signOut()} signOutStatus={signOutStatus} onSignIn={openSignIn} onSwitchTeam={switchTeam} onGrantTeams={grantTeams} />}>
+    <Suspense fallback={<AccountMenu user={accountUser} sidebar={sidebarAccount} side={side} />}>
       <BootRegion boot={account} live={user === undefined ? undefined : { user: accountUser ?? null, team }}>
-        {(view) => <AccountMenu user={view.user?.guest ? null : view.user} sidebar={sidebarAccount} side={side} team={view.team} onSignOut={() => void signOut()} signOutStatus={signOutStatus} onSignIn={openSignIn} onSwitchTeam={switchTeam} onGrantTeams={grantTeams} />}
+        {(view) => <AccountMenu user={view.user?.guest ? null : view.user} sidebar={sidebarAccount} side={side} />}
       </BootRegion>
     </Suspense>
   )

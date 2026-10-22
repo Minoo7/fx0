@@ -1,10 +1,3 @@
-import { NextResponse } from 'next/server'
-import { publicUser } from '@/lib/auth'
-import { isAuthenticatedSession } from '@/lib/secure-session'
-import { withRequestSession } from '@/lib/request-session'
+import { withUserRoute } from '@/lib/route-auth'
 
-export const GET = withRequestSession(async (_request, session) => {
-  return NextResponse.json({ user: isAuthenticatedSession(session) ? publicUser(session) : null }, {
-    headers: { 'Cache-Control': 'no-store' },
-  })
-})
+export const GET = withUserRoute(async (_request, { user }) => Response.json({ user }))
