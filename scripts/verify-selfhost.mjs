@@ -5,7 +5,7 @@ import { setTimeout } from 'node:timers/promises'
 const base = 'http://127.0.0.1:3000'
 const secret = await readFile('/secrets/proxy', 'utf8')
 const headers = {
-  host: 'fx0.example.invalid', origin: 'https://fx0.example.invalid',
+  origin: 'https://127.0.0.1:3000',
   'x-fx0-proxy-secret': secret, 'tailscale-user-login': 'ci@example.invalid',
   'content-type': 'application/json',
 }
@@ -23,7 +23,7 @@ const providers = await fetch(`${base}/api/providers`, { headers })
 assert.equal(providers.status, 200)
 assert((await providers.json()).providers.length > 10)
 const create = await fetch(`${base}/api/sessions`, { method: 'POST', headers, body: '{}' })
-assert.equal(create.status, 201)
+assert.equal(create.status, 201, await create.clone().text())
 const { sessionId } = await create.json()
 try {
   const owned = await fetch(`${base}/api/session?session=${sessionId}`, { headers })
