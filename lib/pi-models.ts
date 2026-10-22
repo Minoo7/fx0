@@ -4,6 +4,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { sealData, unsealData } from 'iron-session'
 import { Pool } from 'pg'
 import { withAccountDatabase, AuthError } from './accounts'
+import { withChatGPTModels } from './chatgpt-provider'
 
 let credentialPool: Pool | undefined
 function credentialPassword(): string {
@@ -56,6 +57,7 @@ const credentials: CredentialStore = {
 }
 
 export const piModels = builtinModels({ credentials })
+piModels.setProvider(withChatGPTModels(piModels.getProvider('openai')!))
 
 // Custom OpenAI-compatible endpoints use Pi's provider extension unchanged.
 if (process.env.FX0_CUSTOM_PROVIDERS) {
@@ -81,8 +83,19 @@ export function findModel(id: string): Model<Api> {
 }
 
 export async function assertModelAccess(id: string): Promise<void> {
+  if (id.startsWith('openai/')) {
+    await refreshChatGPTModels()
+    if (!(await piModels.getAvailable('openai')).some(model => modelId(model) === id)) {
+      throw new AuthError(400, 'This model is unavailable through your OpenAI connection. Choose a model from the picker.')
+    }
+  }
   const model = findModel(id)
   if (!await piModels.getAuth(model)) throw new AuthError(503, `Connect ${model.provider} in model providers before generating a design.`)
+}
+
+export async function refreshChatGPTModels(): Promise<void> {
+  const result = await piModels.refresh({ providers: ['openai'], allowNetwork: true, signal: AbortSignal.timeout(15_000) })
+  if (result.aborted || result.errors.has('openai')) throw new AuthError(503, 'Could not load models from OpenAI. Try again.')
 }
 
 export function libfxCatalog() {

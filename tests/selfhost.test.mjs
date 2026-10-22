@@ -13,6 +13,26 @@ import { effectiveEffort } from '../lib/session.ts'
 import { GET as listProviders, DELETE as disconnectProvider } from '../app/api/providers/route.ts'
 import { startProviderLogin, providerLogin, loginView } from '../lib/provider-login.ts'
 import { GET as listModels } from '../app/api/models/route.ts'
+import { chatgptModels, withChatGPTModels } from '../lib/chatgpt-provider.ts'
+
+test('ChatGPT account metadata replaces bundled models and excludes hidden models', () => {
+  const accountModel = {
+    slug: 'gpt-6.1-sol', display_name: 'GPT-6.1-Sol', visibility: 'list', supported_in_api: true,
+    context_window: 500000, input_modalities: ['text', 'image'],
+    supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(effort => ({ effort })),
+  }
+  const models = chatgptModels({ models: [accountModel, { slug: 'gpt-reserve', visibility: 'hide' }] })
+  expect(models.map(modelId)).toEqual(['openai/gpt-6.1-sol'])
+  expect(models[0]).toMatchObject({ contextWindow: 500000, reasoning: true, input: ['text', 'image'] })
+  expect(models[0].thinkingLevelMap).toMatchObject({ low: 'low', max: 'max', off: null, minimal: null })
+  expect(() => chatgptModels({ data: [] })).toThrow('Invalid ChatGPT model catalog')
+  expect(() => chatgptModels({ models: [{ ...accountModel, context_window: 0 }] })).toThrow('Invalid ChatGPT model metadata')
+  const provider = withChatGPTModels(piModels.getProvider('openai'))
+  const bundled = provider.getModels()
+  expect(bundled.some(model => model.id === 'gpt-4o')).toBe(true)
+  expect(provider.filterModels(bundled, { type: 'oauth', access: 'unresolved-account' })).toEqual([])
+  expect(provider.filterModels(bundled, { type: 'api_key', key: 'storage-test' })).toEqual(bundled)
+})
 
 test('ChatGPT sign-in starts with a persistent installation ID and accepts cancellation', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'fx0-login-'))

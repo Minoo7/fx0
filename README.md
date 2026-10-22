@@ -3,7 +3,8 @@
 fx0's design UI, tools, chat history and libfx runtime, with Pi AI for model providers.
 Provider support follows the pinned `@earendil-works/pi-ai` version. All of its
 chat models are supported; the model picker lists models available through
-connected providers and refreshes when opened.
+connected providers and refreshes when opened. ChatGPT sign-in uses OpenAI’s
+live account-specific model list, including models newer than Pi’s bundled catalog.
 
 ## Deploy through Dokploy
 

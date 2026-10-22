@@ -1,4 +1,4 @@
-import { piModels, modelId } from '../../../lib/pi-models'
+import { piModels, modelId, refreshChatGPTModels } from '../../../lib/pi-models'
 import { DEFAULT_MODEL } from '../../../lib/session'
 import { withUserRoute } from '../../../lib/route-auth'
 
@@ -13,9 +13,10 @@ export interface ModelCatalog {
 let refreshedAt = 0
 export const GET = withUserRoute(async () => {
   if (Date.now() - refreshedAt > 300_000) {
-    await piModels.refresh({ allowNetwork: true, signal: AbortSignal.timeout(15_000) })
+    await piModels.refresh({ providers: piModels.getProviders().map(provider => provider.id).filter(id => id !== 'openai'), allowNetwork: true, signal: AbortSignal.timeout(15_000) })
     refreshedAt = Date.now()
   }
+  await refreshChatGPTModels()
   const models = await piModels.getAvailable()
   const efforts = Object.fromEntries(models.filter(m => m.reasoning).map(m => [modelId(m),
     Object.entries(m.thinkingLevelMap ?? { low: '', medium: '', high: '' }).filter(([level, value]) => level !== 'off' && value !== null).map(([level]) => level)]))
