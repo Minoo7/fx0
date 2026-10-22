@@ -16,10 +16,11 @@ export const GET = withUserRoute(async () => {
     await piModels.refresh({ allowNetwork: true, signal: AbortSignal.timeout(15_000) })
     refreshedAt = Date.now()
   }
-  const models = piModels.getModels()
-  const available = await piModels.getAvailable()
+  const models = await piModels.getAvailable()
   const efforts = Object.fromEntries(models.filter(m => m.reasoning).map(m => [modelId(m),
     Object.entries(m.thinkingLevelMap ?? { low: '', medium: '', high: '' }).filter(([level, value]) => level !== 'off' && value !== null).map(([level]) => level)]))
-  return Response.json({ models: models.map(modelId).sort(), defaultModel: process.env.FX0_MODEL ?? DEFAULT_MODEL,
-    efforts, fast: [], featured: available.slice(0, 12).map(modelId) } satisfies ModelCatalog)
+  const ids = models.map(modelId).sort()
+  const preferred = process.env.FX0_MODEL ?? DEFAULT_MODEL
+  return Response.json({ models: ids, defaultModel: ids.includes(preferred) ? preferred : ids[0] ?? '',
+    efforts, fast: [], featured: models.slice(0, 12).map(modelId) } satisfies ModelCatalog)
 })

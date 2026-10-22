@@ -2,7 +2,8 @@
 
 fx0's design UI, tools, chat history and libfx runtime, with Pi AI for model providers.
 Provider support follows the pinned `@earendil-works/pi-ai` version. All of its
-chat models are listed; availability depends on credentials and provider access.
+chat models are supported; the model picker lists models available through
+connected providers and refreshes when opened.
 
 ## Deploy through Dokploy
 
