@@ -27,6 +27,7 @@ export function chatgptModels(value: unknown): Model<'openai-responses'>[] {
 export function withChatGPTModels(provider: Provider): Provider {
   let access: string | undefined
   let models: Model<'openai-responses'>[] = []
+  let refreshedAt = 0
   return {
     ...provider,
     getModels: () => [...models, ...provider.getModels().filter(model => !models.some(current => current.id === model.id))],
@@ -36,12 +37,13 @@ export function withChatGPTModels(provider: Provider): Provider {
     async refreshModels(context) {
       if (!context.allowNetwork || context.credential?.type !== 'oauth') return
       const token = context.credential.access
+      if (!context.force && token === access && Date.now() - refreshedAt < 300_000) return
       const response = await fetch('https://api.openai.com/v1/models', {
         headers: { Authorization: `Bearer ${token}` }, signal: context.signal,
       })
       if (!response.ok) throw new Error(`ChatGPT model discovery failed (${response.status})`)
       const next = chatgptModels(await response.json())
-      await context.publish({ update: () => { models = next; access = token } })
+      await context.publish({ update: () => { models = next; access = token; refreshedAt = Date.now() } })
     },
   }
 }

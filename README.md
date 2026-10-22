@@ -5,6 +5,8 @@ Provider support follows the pinned `@earendil-works/pi-ai` version. All of its
 chat models are supported; the model picker lists models available through
 connected providers and refreshes when opened. ChatGPT sign-in uses OpenAI’s
 live account-specific model list, including models newer than Pi’s bundled catalog.
+Discovery is cached for five minutes per credential; changed credentials refresh
+immediately. Warm prompts and picker reads reuse the catalog.
 
 ## Deploy through Dokploy
 
@@ -74,5 +76,11 @@ process for streamed draft replay. A real provider connection is required to
 verify prompt → tools → published design; catalog/auth checks alone do not prove
 generation. Upstream Vercel OAuth/trial tests describe the upstream product,
 not this deployment's authentication contract.
+
+After connecting ChatGPT, run `docker compose exec -T app node --experimental-strip-types --test tests/chatgpt-catalog.integration.mjs`
+inside the deployment. This uses the saved connection and real OpenAI requests
+to verify discovery caching, forced refresh, disconnection and credential isolation.
+It never changes the saved credential. CI has no ChatGPT subscription credential,
+so this account-specific test runs separately.
 
 Based on [vercel-labs/fx0](https://github.com/vercel-labs/fx0), Apache-2.0.

@@ -223,8 +223,6 @@ export async function submitPrompt(
   previews?: string[],
   assets?: PendingDesignAssets,
 ): Promise<{ id: number; seq: number; trialChat: boolean }> {
-  // A turn needs at least 15 minutes left on the credential it bills; libfx runs
-  // it, including a crash recovery, within that.
   await assertPromptFunding(host, initial?.preferredModel ?? effectiveModel(host))
   const stages = promptStages()
   const submitted = await journalPrompt(host.id, { author, text, clientId, images, previews }, initial, false)
