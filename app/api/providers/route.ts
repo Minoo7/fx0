@@ -1,15 +1,17 @@
 import { withUserRoute } from '../../../lib/route-auth'
 import { piModels } from '../../../lib/pi-models'
 import { answerProviderLogin, loginView, providerLogin, startProviderLogin } from '../../../lib/provider-login'
-import { AuthError } from '../../../lib/accounts'
+import { AuthError, withAccountDatabase } from '../../../lib/accounts'
 import type { AuthType } from '@earendil-works/pi-ai'
 
 export const GET = withUserRoute(async (request, { user }) => {
   const id = new URL(request.url).searchParams.get('login')
   if (id) return Response.json(loginView(user.id, id))
+  const saved = new Set(await withAccountDatabase(async q => (await q('SELECT provider_id FROM fx0_provider_credentials')).map(row => String(row.provider_id))))
   const providers = await Promise.all(piModels.getProviders().map(async p => ({
     id: p.id, name: p.name, models: p.getModels().length,
     configured: !!await piModels.checkAuth(p.id),
+    hasSavedCredentials: saved.has(p.id),
     methods: [p.auth.apiKey?.login ? { type: 'api_key', label: p.auth.apiKey.name } : null,
       p.auth.oauth ? { type: 'oauth', label: p.auth.oauth.loginLabel ?? p.auth.oauth.name } : null].filter(Boolean),
   })))

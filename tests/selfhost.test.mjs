@@ -10,6 +10,7 @@ import { fileAssets } from '../lib/file-assets.ts'
 import { piContext, piReplayMetadata } from '../lib/pi-context.ts'
 import { piModels, modelId, findModel } from '../lib/pi-models.ts'
 import { effectiveEffort } from '../lib/session.ts'
+import { GET as listProviders, DELETE as disconnectProvider } from '../app/api/providers/route.ts'
 
 test('tailnet identity requires the private proxy and mutations require same origin', () => {
   process.env.FX0_PROXY_SECRET = randomUUID()
@@ -32,6 +33,38 @@ test('all Pi chat models roundtrip through the fx0 model identifier', () => {
   const models = piModels.getModels()
   expect(models.length).toBeGreaterThan(100)
   for (const model of models) expect(findModel(modelId(model))).toEqual(model)
+})
+
+test('provider removal deletes saved credentials without hiding environment access or other connections', async () => {
+  process.env.SESSION_SECRET ??= randomUUID()
+  const oldKey = process.env.ANTHROPIC_API_KEY
+  const headers = {
+    'x-fx0-proxy-secret': process.env.FX0_PROXY_SECRET,
+    'tailscale-user-login': 'provider-test@example.invalid',
+    origin: process.env.APP_URL,
+    'content-type': 'application/json',
+  }
+  const provider = async id => {
+    const response = await listProviders(new Request(`${process.env.APP_URL}/api/providers`, { headers }))
+    expect(response.status).toBe(200)
+    return (await response.json()).providers.find(p => p.id === id)
+  }
+  const interaction = { signal: new AbortController().signal, notify() {}, prompt: async () => `credential-storage-test:${randomUUID()}` }
+  try {
+    await piModels.login('anthropic', 'api_key', interaction)
+    await piModels.login('openai', 'api_key', interaction)
+    expect((await provider('anthropic')).hasSavedCredentials).toBe(true)
+    process.env.ANTHROPIC_API_KEY = `environment-storage-test:${randomUUID()}`
+    const request = new Request(`${process.env.APP_URL}/api/providers`, { method: 'DELETE', headers, body: JSON.stringify({ provider: 'anthropic' }) })
+    expect((await disconnectProvider(request)).status).toBe(200)
+    expect(await provider('anthropic')).toMatchObject({ configured: true, hasSavedCredentials: false })
+    expect((await provider('openai')).hasSavedCredentials).toBe(true)
+  } finally {
+    await piModels.logout('anthropic')
+    await piModels.logout('openai')
+    if (oldKey === undefined) delete process.env.ANTHROPIC_API_KEY
+    else process.env.ANTHROPIC_API_KEY = oldKey
+  }
 })
 
 test('new chats let libfx choose a supported reasoning default for any model', () => {
