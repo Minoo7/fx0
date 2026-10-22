@@ -33,3 +33,9 @@ jobs:
       - run: bun run build
       - run: docker compose config --quiet
       - run: docker build -t fx0-selfhost:ci .
+      - run: docker compose up -d app
+      - run: docker compose exec -T app node scripts/verify-selfhost.mjs
+      - if: failure()
+        run: docker compose logs --tail=40 app postgres redis init
+      - if: always()
+        run: docker compose down -v
