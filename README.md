@@ -27,7 +27,7 @@ shared by this deployment and encrypted in Postgres; use a trusted personal
 tailnet. Environment credentials follow Pi's own precedence and cannot be removed
 by disconnecting a saved connection. Some providers require ambient cloud
 credentials or provider-specific setup; consult [Pi AI](https://github.com/earendil-works/pi/tree/main/packages/ai).
-Search providers by name, then use **Remove saved credentials** to disconnect a
+Search providers by name and filter by **All**, **Connected**, or **Not connected**, then use **Remove saved credentials** to disconnect a
 saved connection. Providers configured only through environment or cloud
 credentials must be disconnected in Dokploy.
 
