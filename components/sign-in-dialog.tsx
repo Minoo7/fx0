@@ -13,7 +13,7 @@ export default function SignInDialog({ open, reauthorize, onOpenChange, onSignIn
   onOpenChange: (open: boolean) => void
   onSignIn: () => boolean
 }) {
-  const href = reauthorize ? '/api/auth/signin?reauth=true' : '/api/auth/signin'
+  const href = '/'
   // Pending from the press until the page leaves; back navigation restores the page
   // from the back/forward cache, so pageshow clears it.
   const [redirecting, setRedirecting] = useState(false)
@@ -39,9 +39,9 @@ export default function SignInDialog({ open, reauthorize, onOpenChange, onSignIn
       <DialogContent
         onOpenAutoFocus={(event) => { event.preventDefault(); (event.currentTarget as HTMLElement).focus() }}
         onCloseAutoFocus={(event) => { event.preventDefault(); focusPrompt() }}>
-        <DialogTitle className="text-lg font-medium">{reauthorize ? 'Reauthorize your account' : 'Sign in to generate'}</DialogTitle>
+        <DialogTitle className="text-lg font-medium">Reconnect through Tailscale</DialogTitle>
         <DialogDescription className="mt-2 text-sm text-muted-foreground">
-          {reauthorize ? 'Team access needs to be authorized again.' : 'Your draft is kept.'}
+          Connect to your tailnet, then reload fx0. Your draft is kept.
         </DialogDescription>
         {error && <p role="alert" className="mt-3 text-sm text-error">{error}</p>}
         <div className="mt-5 flex flex-wrap gap-2">
@@ -70,7 +70,7 @@ export default function SignInDialog({ open, reauthorize, onOpenChange, onSignIn
                 <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
               </svg>
             )}
-            {reauthorize ? 'Reauthorize with Vercel' : 'Sign in with Vercel'}
+            Reload fx0
           </a>
           <Button variant="outline" {...fastClick(() => onOpenChange(false))}>Cancel</Button>
         </div>

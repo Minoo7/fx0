@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { Redis } from '@upstash/redis'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { createRedis } from './redis-client.ts'
 // @ts-expect-error Node's strip-types integration test requires the source extension.
 import { assetReference, rewriteRemoteImages, validateDesignArtifactHtml } from './design-artifact.ts'
 // @ts-expect-error Node's strip-types integration test requires the source extension.
@@ -18,10 +20,9 @@ let client: Redis | null = null
 
 export function redis(): Redis {
   if (!client) {
-    const url = process.env.KV_REST_API_URL
-    const token = process.env.KV_REST_API_TOKEN
-    if (!url || !token) throw new Error('Redis journal is not configured (KV_REST_API_URL/KV_REST_API_TOKEN)')
-    client = new Redis({ url, token })
+    const url = process.env.REDIS_URL
+    if (!url) throw new Error('REDIS_URL is required')
+    client = createRedis(url)
   }
   return client
 }

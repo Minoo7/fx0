@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { del, get, list, put } from '@vercel/blob'
+import { fileAssets } from './file-assets'
 import {
   MAX_CHAT_ASSETS, MAX_DAILY_ASSETS, finishDesignAssetCleanup, pendingDesignAssetCleanups,
   queueDesignAssetCleanup, readDesignAssets, recordDesignAssets, reserveDesignAssets,
@@ -12,13 +12,13 @@ import type { PromptImage } from './prompt-images'
 // handle recorded for the chat is ever read, and deleting the chat removes it.
 
 export interface DesignAssetStore {
-  put: typeof put
-  get: typeof get
-  del: typeof del
-  list: typeof list
+  put(path: string, bytes: Buffer, options: { access: 'private'; contentType: string; addRandomSuffix: boolean }): Promise<unknown>
+  get(path: string, options: { access: 'private' }): Promise<{ statusCode: number; stream: ReadableStream<Uint8Array> } | null>
+  del(paths: string[]): Promise<unknown>
+  list(options: { prefix: string; cursor?: string; limit: number }): Promise<{ blobs: { pathname: string }[]; hasMore: boolean; cursor?: string }>
 }
 
-const BLOB: DesignAssetStore = { put, get, del, list }
+const BLOB: DesignAssetStore = fileAssets
 
 /** A message that would pass the per-chat or per-day image cap. Nothing was stored. */
 export class DesignAssetLimitError extends Error {

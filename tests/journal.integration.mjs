@@ -2,13 +2,10 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import test from 'node:test'
-import { Redis } from '@upstash/redis'
+import { createRedis } from '../lib/redis-client.ts'
 
-const url = process.env.KV_REST_API_URL
-const token = process.env.KV_REST_API_TOKEN
-if (!url || !token) {
-  throw new Error('journal integration test requires KV_REST_API_URL and KV_REST_API_TOKEN')
-}
+const url = process.env.REDIS_URL
+if (!url) throw new Error('journal integration test requires REDIS_URL')
 
 const prefix = `fx0:test:${randomUUID()}`
 assert.notEqual(prefix, 'fx0:v1')
@@ -19,7 +16,7 @@ process.env.SESSION_SECRET ??= 'journal-integration-test-secret-0123456789'
 const journal = await import('../lib/journal.ts')
 const credentials = await import('../lib/turn-credential.ts')
 const drafts = await import('../lib/draft-store.ts')
-const redis = new Redis({ url, token })
+const redis = createRedis(url)
 const key = (sessionId, part) => `${prefix}:session:${sessionId}:${part}`
 
 async function clearTestPrefix() {
@@ -48,7 +45,7 @@ test('journal Redis integration uses isolated durable session state', async (t) 
       const streamModule=new URL('../lib/event-stream.ts',import.meta.url).href
       const remoteReader=execFileSync(process.execPath,['--experimental-strip-types','--input-type=module','-e',`
         import {registerHooks} from 'node:module';
-        registerHooks({resolve(s,c,next){if(c.parentURL?.includes('/lib/')&&s.startsWith('.')&&!s.endsWith('.ts'))return next(s+'.ts',c);return next(s,c)}});
+          registerHooks({resolve(s,c,next){if(c.parentURL?.includes('/fx0/lib/')&&s.startsWith('.')&&!s.endsWith('.ts'))return next(s+'.ts',c);return next(s,c)}});
         const {createSessionEventStream}=await import(${JSON.stringify(streamModule)});
         const reader=createSessionEventStream(${JSON.stringify(id)}).getReader();
         const {value}=await reader.read();

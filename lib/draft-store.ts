@@ -1,6 +1,5 @@
 // @ts-expect-error Node strip-types tests require the source extension.
-import { prefixed, emitLive } from './journal.ts'
-import { Redis } from '@upstash/redis'
+import { prefixed, emitLive, redis } from './journal.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { createDraftBatch } from './design-draft.ts'
 import type { DesignDraftObserver } from './gateway-session'
@@ -8,12 +7,6 @@ import type { StreamItem } from './events'
 
 const TTL_MS = 30 * 60_000
 const MAX_BYTES = 512 * 1024
-let client: Redis | undefined
-// Provisional previews have a bounded deadline and do not retry store outages.
-function redis(): Redis {
-  return client ??= new Redis({ url: process.env.KV_REST_API_URL!, token: process.env.KV_REST_API_TOKEN!,
-    retry: false, signal: () => AbortSignal.timeout(1500) })
-}
 const keys = (id: string) => ['state', 'deleting', 'draft', 'draft-chunks'].map(part => prefixed(`session:${id}:${part}`))
 
 const RESERVE = `

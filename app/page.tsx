@@ -4,27 +4,16 @@ import type { PagePreference } from '../components/composer'
 import { DEFAULT_MODEL } from '../lib/session'
 import { readSession, readTranscript } from '../lib/journal'
 import { AuthError, assertSessionOwner, validSessionId } from '../lib/accounts'
-import { publicUser, requireUserSession } from '../lib/auth'
+import { publicUser, requireUserSession } from '../lib/tailnet-auth'
 import { listOwnedSessions } from '../lib/route-auth'
 import { compactTranscript } from '../lib/transcript'
 import { DEFAULT_VIEW } from '../components/chat-state'
 import { cookies, headers } from 'next/headers'
-import { getGuestSession, guestUser, remainingFreePrompts, trialEnabled } from '../lib/trial'
-import { claimGuestSessions } from '../lib/accounts'
 
 async function loadAccount(): Promise<AccountBoot> {
   await connection()
-  const guest = await getGuestSession()
-  const freePrompts = trialEnabled() ? await remainingFreePrompts(await headers()).catch(() => null) : null
-  try {
-    const session = await requireUserSession()
-    if (guest) await claimGuestSessions(guest.userId, session.userId)
-    return { user: publicUser(session), team: session.teamSlug || session.teamId || null, freePrompts }
-  } catch (error) {
-    if (!(error instanceof AuthError) || error.status !== 401) throw error
-    return { user: guest ? guestUser(guest) : freePrompts !== null
-      ? { id: 'guest:new', name: 'You', email: null, picture: null, guest: true } : null, team: null, freePrompts }
-  }
+  const session = await requireUserSession()
+  return { user: publicUser(session), team: null, freePrompts: null }
 }
 
 async function loadChat(account: Promise<AccountBoot>, searchParams: PageProps<'/'>['searchParams']): Promise<ChatBoot> {
