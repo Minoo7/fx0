@@ -55,6 +55,7 @@ services:
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: 'true'
       TS_AUTH_ONCE: 'true'
+      TS_BOOT_TIMEOUT: 1h
       TS_SERVE_CONFIG: /secrets/serve.json
       TS_AUTHKEY: ${TS_AUTHKEY:-}
     depends_on:
