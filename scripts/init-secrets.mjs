@@ -17,8 +17,7 @@ await Promise.all(['database', 'session', 'proxy'].map(secret))
 const redis = await secret('redis')
 await writeFile(join(directory, 'redis.conf'), `appendonly yes\nrequirepass ${redis}\n`, { mode: 0o600 })
 await writeFile(join(directory, 'serve.json'), JSON.stringify({
-  TCP: { 443: { HTTPS: true } },
-  Web: { '${TS_CERT_DOMAIN}:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:8080' } } } },
+  TCP: { 8080: { TCPForward: '127.0.0.1:8080' } },
   AllowFunnel: {},
 }), { mode: 0o644 })
 console.log('fx0 private runtime configuration ready')

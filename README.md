@@ -12,8 +12,12 @@ For example, `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`; never commit keys.
 Set `FX0_MODEL` to a catalog ID such as `anthropic/claude-sonnet-4-5`.
 
 Set `TS_AUTHKEY` to a Tailscale auth key in Environment, or complete the device
-login URL in the Tailscale container's logs. Enable HTTPS certificates and Serve
-in the tailnet. Open the resulting `https://fx0.<your-tailnet>.ts.net` address.
+login URL in the Tailscale container's logs. Enable Serve in the tailnet.
+Route `https://fx0.planasolutions.ai` through TSDProxy to the sidecar's tailnet
+port 8080. Use a DNS-only record pointing to the shared private proxy. The target
+URL must include Basic credentials `fx0:<proxy secret>`, with the secret read
+privately from `/secrets/proxy` in the proxy container. TSDProxy supplies the
+authenticated user's identity headers. Keep its target URL private.
 Do not expose an application port or enable Funnel. No Vercel login is needed.
 
 Alternatively, open **Model providers** from the account menu. Pi supplies each
@@ -24,7 +28,8 @@ by disconnecting a saved connection. Some providers require ambient cloud
 credentials or provider-specific setup; consult [Pi AI](https://github.com/earendil-works/pi/tree/main/packages/ai).
 
 The stack creates Postgres, Redis, persistent application storage and a Tailscale
-sidecar. Only Tailscale Serve reaches the loopback identity proxy. The app verifies
+sidecar. Tailscale TCP Serve reaches the loopback identity proxy, which verifies
+the shared secret before accepting TSDProxy identity headers. The app verifies
 a private proxy secret and Tailscale identity on every request. Chat ownership is
 enforced in Postgres; mutations require the same browser origin.
 
@@ -50,7 +55,7 @@ Use Node 24 and Bun 1.3.8. `bun install --frozen-lockfile`, then `bun run build`
 `node scripts/init-secrets.mjs` initializes the secrets volume; local development
 can set `FX0_SECRETS_DIR=.data/secrets`. Start real Postgres and Redis, run
 `bun run db:migrate`, then `node scripts/start-selfhost.mjs`. See `.env.example`.
-Use the loopback proxy and Tailscale Serve for browser access; raw localhost
+Use the custom domain through TSDProxy for browser access; raw localhost
 requests intentionally return 403.
 
 Checks: `bun run typecheck`, `bun run build`, and

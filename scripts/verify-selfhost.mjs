@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { setTimeout } from 'node:timers/promises'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 
 const base = 'http://127.0.0.1:3000'
 const secret = await readFile('/secrets/proxy', 'utf8')
@@ -41,3 +43,31 @@ try {
   assert.equal(remove.status, 200)
 }
 console.log('Real Compose startup, Pi catalog, chat lifecycle, ownership and origin checks passed')
+
+const proxy = spawn(process.execPath, ['scripts/tailnet-proxy.mjs'], {
+  env: { ...process.env, FX0_PROXY_PORT: '3001', FX0_UPSTREAM: base }, stdio: 'inherit',
+})
+try {
+  let listening = false
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try { listening = (await fetch('http://127.0.0.1:3001', { signal: AbortSignal.timeout(1000) })).status === 403 } catch {}
+    if (listening) break
+    await setTimeout(100)
+  }
+  assert(listening, 'identity proxy must start and deny unauthenticated access')
+  const auth = { authorization: `Basic ${Buffer.from(`fx0:${secret}`).toString('base64')}` }
+  for (const untrusted of [{ 'x-tsdproxy-username': 'spoof@example.invalid' }, auth]) {
+    assert.equal((await fetch('http://127.0.0.1:3001/api/auth/me', { headers: untrusted })).status, 403)
+  }
+  const identity = await fetch('http://127.0.0.1:3001/api/auth/me', { headers: {
+    ...auth, 'x-tsdproxy-username': 'ci@example.invalid',
+    'tailscale-user-login': 'spoof@example.invalid',
+  } })
+  assert.equal(identity.status, 200)
+  assert.equal((await identity.json()).user.email, 'ci@example.invalid')
+  console.log('Real identity proxy authentication and spoofed-header rejection passed')
+} finally {
+  const exited = once(proxy, 'exit')
+  proxy.kill('SIGTERM')
+  await exited
+}
