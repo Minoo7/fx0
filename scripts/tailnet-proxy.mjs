@@ -6,8 +6,8 @@ const secret = process.env.FX0_PROXY_SECRET ?? await readFile(`${process.env.FX0
 const upstream = process.env.FX0_UPSTREAM ?? 'http://app:3000'
 const authorization = Buffer.from(secret)
 createServer((incoming, outgoing) => {
-  const url = new URL(incoming.url, 'http://localhost')
-  const received = Buffer.from(url.searchParams.get('fx0_proxy_key') ?? '')
+  const url = URL.parse(incoming.url, 'http://localhost')
+  const received = Buffer.from(url?.searchParams.get('fx0_proxy_key') ?? '')
   if (received.length !== authorization.length || !timingSafeEqual(received, authorization) ||
     !incoming.headers['x-tsdproxy-username']) {
     outgoing.writeHead(403).end('Tailscale user identity required')
