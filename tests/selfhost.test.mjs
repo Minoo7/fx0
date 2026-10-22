@@ -7,7 +7,7 @@ import { Pool } from 'pg'
 import { reserveSession, assertSessionOwner, removeOwnedSession, ownedSessionIds } from '../lib/accounts.ts'
 import { tailnetSession, assertSameOrigin } from '../lib/tailnet-auth.ts'
 import { fileAssets } from '../lib/file-assets.ts'
-import { piContext } from '../lib/pi-context.ts'
+import { piContext, piReplayMetadata } from '../lib/pi-context.ts'
 import { piModels, modelId, findModel } from '../lib/pi-models.ts'
 
 test('tailnet identity requires the private proxy and mutations require same origin', () => {
@@ -45,6 +45,20 @@ test('libfx conversation becomes Pi text, images, tool calls and tool results', 
   expect(context.messages[1].content[1]).toEqual({ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' })
   expect(context.messages[2].content[0].arguments.html).toBe('<h1>Hello</h1>')
   expect(context.messages[3].content[0].text).toBe('{"ok":true}')
+})
+
+test('reasoning and tool signatures survive libfx provider replay and model switches', () => {
+  const previous = findModel('anthropic/claude-sonnet-4-5')
+  const thinking = { type: 'thinking', thinking: 'Reason', thinkingSignature: 'fixture-signature', redacted: false }
+  const call = { type: 'toolCall', id: 'call-1', name: 'publish_design', arguments: {}, thoughtSignature: 'fixture-thought' }
+  const next = findModel('openai/gpt-4o')
+  const context = piContext({ prompt: [{ role: 'assistant', content: [
+    { type: 'reasoning', text: thinking.thinking, providerOptions: piReplayMetadata(previous, thinking) },
+    { type: 'tool-call', toolCallId: call.id, toolName: call.name, input: call.arguments, providerOptions: piReplayMetadata(previous, call) },
+  ] }] }, next)
+  expect(context.messages[0].model).toBe(previous.id)
+  expect(context.messages[0].content[0]).toEqual(thinking)
+  expect(context.messages[0].content[1].thoughtSignature).toBe(call.thoughtSignature)
 })
 
 test('private assets persist, paginate, reject traversal and delete on real disk', async () => {

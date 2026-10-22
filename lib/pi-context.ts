@@ -10,6 +10,19 @@ interface Part {
   toolName?: string
   input?: JsonObject
   output?: { type?: string; value?: unknown }
+  providerOptions?: { pi?: PiReplay }
+}
+interface PiReplay {
+  api: Api; provider: string; model: string
+  thinkingSignature?: string; redacted?: boolean; textSignature?: string
+  thoughtSignature?: string; namespace?: string
+}
+export function piReplayMetadata(model: Model<Api>, part: AssistantMessage['content'][number]) {
+  const pi: PiReplay = { api: model.api, provider: model.provider, model: model.id }
+  if (part.type === 'thinking') { pi.thinkingSignature = part.thinkingSignature; pi.redacted = part.redacted }
+  if (part.type === 'text') pi.textSignature = part.textSignature
+  if (part.type === 'toolCall') { pi.thoughtSignature = part.thoughtSignature; pi.namespace = part.namespace }
+  return { pi }
 }
 export interface ModelRequest {
   prompt: { role: string; content: string | Part[] }[]
@@ -37,7 +50,7 @@ export function piContext(request: ModelRequest, model: Model<Api>): Context {
   const tools: Tool[] = (request.tools ?? []).filter(tool => tool.type === 'function')
     .map(tool => ({ name: tool.name, description: tool.description ?? '', parameters: tool.inputSchema }))
   for (const message of request.prompt) {
-    const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
+    const parts: Part[] = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
     const timestamp = Date.now()
     if (message.role === 'system') {
       messages.push({ role: 'system', content: parts.map(p => p.text ?? '').join('\n'), timestamp })
@@ -46,12 +59,15 @@ export function piContext(request: ModelRequest, model: Model<Api>): Context {
         ? image(p) : { type: 'text' as const, text: p.text ?? '' }) })
     } else if (message.role === 'assistant') {
       const content = parts.flatMap<AssistantMessage['content'][number]>(p => {
-        if (p.type === 'text') return [{ type: 'text' as const, text: p.text ?? '' }]
-        if (p.type === 'tool-call') return [{ type: 'toolCall' as const, id: p.toolCallId!, name: p.toolName!, arguments: p.input ?? {} }]
-        // Unsigned reasoning from libfx cannot be replayed as signed provider thinking.
+        const replay = p.providerOptions?.pi
+        if (p.type === 'text') return [{ type: 'text', text: p.text ?? '', textSignature: replay?.textSignature }]
+        if (p.type === 'reasoning' && replay) return [{ type: 'thinking', thinking: p.text ?? '', thinkingSignature: replay.thinkingSignature, redacted: replay.redacted }]
+        if (p.type === 'tool-call') return [{ type: 'toolCall', id: p.toolCallId!, name: p.toolName!, arguments: p.input ?? {},
+          thoughtSignature: replay?.thoughtSignature, namespace: replay?.namespace }]
         return []
       })
-      messages.push({ role: 'assistant', content, timestamp, api: model.api, provider: model.provider, model: model.id,
+      const replay = parts.find(p => p.providerOptions?.pi)?.providerOptions?.pi
+      messages.push({ role: 'assistant', content, timestamp, api: replay?.api ?? model.api, provider: replay?.provider ?? model.provider, model: replay?.model ?? model.id,
         usage: emptyUsage(), stopReason: content.some(p => p.type === 'toolCall') ? 'toolUse' : 'stop' })
     } else if (message.role === 'tool') {
       for (const p of parts) {

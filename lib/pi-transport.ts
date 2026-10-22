@@ -1,6 +1,6 @@
 import type { ThinkingLevel, ToolCall } from '@earendil-works/pi-ai'
 import { findModel, libfxCatalog, piModels } from './pi-models'
-import { piContext, type ModelRequest } from './pi-context'
+import { piContext, piReplayMetadata, type ModelRequest } from './pi-context'
 import { htmlFieldExtractor, type DesignDraftObserver } from './gateway-session'
 
 export async function piFetch(input: RequestInfo | URL, init?: RequestInit, observer?: DesignDraftObserver): Promise<Response> {
@@ -31,7 +31,8 @@ export async function piFetch(input: RequestInfo | URL, init?: RequestInit, obse
         for await (const event of stream) {
           if (event.type === 'text_start' || event.type === 'thinking_start') send({ type: event.type === 'text_start' ? 'text-start' : 'reasoning-start', id: String(event.contentIndex) })
           if (event.type === 'text_delta' || event.type === 'thinking_delta') send({ type: event.type === 'text_delta' ? 'text-delta' : 'reasoning-delta', id: String(event.contentIndex), delta: event.delta })
-          if (event.type === 'text_end' || event.type === 'thinking_end') send({ type: event.type === 'text_end' ? 'text-end' : 'reasoning-end', id: String(event.contentIndex) })
+          if (event.type === 'text_end' || event.type === 'thinking_end') send({ type: event.type === 'text_end' ? 'text-end' : 'reasoning-end', id: String(event.contentIndex),
+            providerMetadata: piReplayMetadata(model, event.partial.content[event.contentIndex]) })
           if (event.type === 'toolcall_start' || event.type === 'toolcall_delta') {
             const call = event.partial.content[event.contentIndex]
             if (call?.type !== 'toolCall') continue
@@ -47,7 +48,8 @@ export async function piFetch(input: RequestInfo | URL, init?: RequestInit, obse
           }
           if (event.type === 'toolcall_end') {
             send({ type: 'tool-input-end', id: event.toolCall.id })
-            send({ type: 'tool-call', toolCallId: event.toolCall.id, toolName: event.toolCall.name, input: JSON.stringify(event.toolCall.arguments) })
+            send({ type: 'tool-call', toolCallId: event.toolCall.id, toolName: event.toolCall.name, input: JSON.stringify(event.toolCall.arguments),
+              providerMetadata: piReplayMetadata(model, event.toolCall) })
             if (event.toolCall.name === 'publish_design') await observer?.end?.(event.toolCall.id)
           }
           if (event.type === 'error') throw new Error(event.reason === 'aborted' ? 'Generation cancelled' : 'Provider request failed; check provider credentials and quota')
