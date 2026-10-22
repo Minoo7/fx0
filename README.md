@@ -30,6 +30,9 @@ credentials or provider-specific setup; consult [Pi AI](https://github.com/earen
 Search providers by name and filter by **All**, **Connected**, or **Not connected**, then use **Remove saved credentials** to disconnect a
 saved connection. Providers configured only through environment or cloud
 credentials must be disconnected in Dokploy.
+ChatGPT sign-in stores its installation ID in the persistent application-data
+volume. When signing in from another computer, paste the final localhost redirect
+URL into fx0's connection form if the browser cannot reach the callback.
 
 The stack creates Postgres, Redis, persistent application storage and a Tailscale
 sidecar. Tailscale TCP Serve reaches the loopback identity proxy, which verifies
