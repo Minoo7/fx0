@@ -2,11 +2,11 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { after } from 'next/server'
 import { createSessionEventStream } from '../../../lib/event-stream'
-import { assertPromptFunding, followChat, submitPrompt } from '../../../lib/agent'
+import { followChat, submitPrompt } from '../../../lib/agent'
 import { parseDesignMdRequest } from '../../../lib/design-md'
 import { withPromptRoute } from '../../../lib/route-auth'
 import { touchOwnedSession, AuthError } from '../../../lib/accounts'
-import { DEFAULT_MODEL, log } from '../../../lib/session'
+import { DEFAULT_MODEL, effectiveModel, log } from '../../../lib/session'
 import { validatePromptImages, validatePromptPreviews } from '../../../lib/prompt-images'
 import { DesignAssetLimitError, retryDesignAssetCleanup, startDesignAssets } from '../../../lib/design-assets'
 import { PROMPT_TEXT_LIMIT_ERROR, PROMPT_TEXT_MAX_BYTES, promptTextBytes } from '../../../lib/prompt-limits'
@@ -38,9 +38,9 @@ export const POST = withPromptRoute(async (request, context) => {
     designMd,
   }
   // Reject missing provider credentials before reserving a new chat or storing images.
-  if (!context.existing) await assertModelAccess(initial.preferredModel ?? process.env.FX0_MODEL ?? DEFAULT_MODEL)
+  if (!context.existing || images) await assertModelAccess(context.existing
+    ? effectiveModel(context.existing.host) : initial.preferredModel ?? process.env.FX0_MODEL ?? DEFAULT_MODEL)
   const activated = await context.activate()
-  await assertPromptFunding(activated.host, context.existing ? undefined : initial.preferredModel ?? undefined)
   let submitted
   try {
     const assets = images ? await startDesignAssets(activated.id, user.id, images) : undefined

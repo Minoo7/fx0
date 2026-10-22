@@ -93,9 +93,12 @@ export async function assertModelAccess(id: string): Promise<void> {
   if (!await piModels.getAuth(model)) throw new AuthError(503, `Connect ${model.provider} in model providers before generating a design.`)
 }
 
-export async function refreshChatGPTModels(): Promise<void> {
-  const result = await piModels.refresh({ providers: ['openai'], allowNetwork: true, signal: AbortSignal.timeout(15_000) })
-  if (result.aborted || result.errors.has('openai')) throw new AuthError(503, 'Could not load models from OpenAI. Try again.')
+let chatgptRefresh: Promise<void> | undefined
+export function refreshChatGPTModels(): Promise<void> {
+  return chatgptRefresh ??= (async () => {
+    const result = await piModels.refresh({ providers: ['openai'], allowNetwork: true, signal: AbortSignal.timeout(15_000) })
+    if (result.aborted || result.errors.has('openai')) throw new AuthError(503, 'Could not load models from OpenAI. Try again.')
+  })().finally(() => { chatgptRefresh = undefined })
 }
 
 export function libfxCatalog() {
