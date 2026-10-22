@@ -9,6 +9,7 @@ import { tailnetSession, assertSameOrigin } from '../lib/tailnet-auth.ts'
 import { fileAssets } from '../lib/file-assets.ts'
 import { piContext, piReplayMetadata } from '../lib/pi-context.ts'
 import { piModels, modelId, findModel } from '../lib/pi-models.ts'
+import { effectiveEffort } from '../lib/session.ts'
 
 test('tailnet identity requires the private proxy and mutations require same origin', () => {
   process.env.FX0_PROXY_SECRET = randomUUID()
@@ -31,6 +32,11 @@ test('all Pi chat models roundtrip through the fx0 model identifier', () => {
   const models = piModels.getModels()
   expect(models.length).toBeGreaterThan(100)
   for (const model of models) expect(findModel(modelId(model))).toEqual(model)
+})
+
+test('new chats let libfx choose a supported reasoning default for any model', () => {
+  expect(effectiveEffort({ preferredEffort: null })).toBe('default')
+  expect(effectiveEffort({ preferredEffort: 'high' })).toBe('high')
 })
 
 test('libfx conversation becomes Pi text, images, tool calls and tool results', () => {

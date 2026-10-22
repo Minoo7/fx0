@@ -94,7 +94,7 @@ export function effectiveFast(host: SessionState): boolean {
 }
 
 export function effectiveEffort(host: SessionState): string {
-  return host.preferredEffort ?? 'low'
+  return host.preferredEffort ?? 'default'
 }
 
 // Transcript items a tool writes directly (questions, status), in order per chat.

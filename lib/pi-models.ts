@@ -65,7 +65,7 @@ if (process.env.FX0_CUSTOM_PROVIDERS) {
   for (const provider of configured) piModels.setProvider(createProvider({
     ...provider,
     auth: { apiKey: provider.apiKeyEnv ? envApiKeyAuth(provider.name ?? provider.id, [provider.apiKeyEnv])
-      : { name: provider.name ?? provider.id, resolve: async () => ({ auth: {} }) } },
+      : { name: provider.name ?? provider.id, resolve: async () => ({ auth: { apiKey: 'unused' } }) } },
     api: openAICompletionsApi(),
   }))
 }
