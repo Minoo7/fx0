@@ -11,6 +11,40 @@ import { piContext, piReplayMetadata } from '../lib/pi-context.ts'
 import { piModels, modelId, findModel } from '../lib/pi-models.ts'
 import { effectiveEffort } from '../lib/session.ts'
 import { GET as listProviders, DELETE as disconnectProvider } from '../app/api/providers/route.ts'
+import { startProviderLogin, providerLogin, loginView } from '../lib/provider-login.ts'
+
+test('ChatGPT sign-in starts with a persistent installation ID and accepts cancellation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'fx0-login-'))
+  const previous = process.env.FX0_DATA_DIR
+  process.env.FX0_DATA_DIR = directory
+  let hostId
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const id = startProviderLogin('oauth-regression', 'openai', 'oauth')
+      try {
+        for (let tick = 0; tick < 100 && !loginView('oauth-regression', id).prompt && loginView('oauth-regression', id).status === 'pending'; tick++) await Bun.sleep(10)
+        const view = loginView('oauth-regression', id)
+        expect(view.status).toBe('pending')
+        expect(view.prompt.type).toBe('manual_code')
+        const event = view.events.find(event => event.type === 'auth_url')
+        const url = new URL(event.url)
+        expect(url.origin).toBe('https://auth.openai.com')
+        const current = url.searchParams.get('ext_agent_host_id')
+        expect(current).toMatch(/^urn:uuid:[0-9a-f-]{36}$/)
+        if (hostId) expect(current).toBe(hostId)
+        hostId = current
+      } finally {
+        providerLogin('oauth-regression', id).abort.abort()
+        for (let tick = 0; tick < 100 && loginView('oauth-regression', id).status === 'pending'; tick++) await Bun.sleep(10)
+        expect(loginView('oauth-regression', id).status).toBe('failed')
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.FX0_DATA_DIR
+    else process.env.FX0_DATA_DIR = previous
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 
 test('tailnet identity requires the private proxy and mutations require same origin', () => {
   process.env.FX0_PROXY_SECRET = randomUUID()

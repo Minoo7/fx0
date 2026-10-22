@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { AuthEvent, AuthPrompt, AuthType } from '@earendil-works/pi-ai'
 import { piModels } from './pi-models'
 import { AuthError } from './accounts'
@@ -15,6 +17,19 @@ interface Login {
 }
 const globalLogins = globalThis as unknown as { fx0ProviderLogins?: Map<string, Login> }
 const logins = globalLogins.fx0ProviderLogins ??= new Map<string, Login>()
+
+function getDeviceId(): string {
+  const directory = process.env.FX0_DATA_DIR ?? '.data'
+  const path = join(directory, 'provider-device-id')
+  try { return readFileSync(path, 'utf8').trim() } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  try { writeFileSync(path, randomUUID(), { flag: 'wx', mode: 0o600 }) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+  return readFileSync(path, 'utf8').trim()
+}
 
 export function startProviderLogin(owner: string, provider: string, type: AuthType): string {
   const entry = piModels.getProvider(provider)
@@ -52,7 +67,7 @@ export function startProviderLogin(owner: string, provider: string, type: AuthTy
         resolve(value)
       }
     }),
-  }, { agentName: 'fx0' }).then(() => {
+  }, { agentName: 'fx0', getDeviceId }).then(() => {
     login.status = 'done'
     login.prompt = undefined
   }, () => {
