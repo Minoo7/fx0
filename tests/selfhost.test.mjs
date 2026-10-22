@@ -12,6 +12,7 @@ import { piModels, modelId, findModel } from '../lib/pi-models.ts'
 import { effectiveEffort } from '../lib/session.ts'
 import { GET as listProviders, DELETE as disconnectProvider } from '../app/api/providers/route.ts'
 import { startProviderLogin, providerLogin, loginView } from '../lib/provider-login.ts'
+import { GET as listModels } from '../app/api/models/route.ts'
 
 test('ChatGPT sign-in starts with a persistent installation ID and accepts cancellation', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'fx0-login-'))
@@ -105,6 +106,42 @@ test('new chats let libfx choose a supported reasoning default for any model', (
   expect(effectiveEffort({ preferredEffort: null })).toBe('default')
   expect(effectiveEffort({ preferredEffort: 'high' })).toBe('high')
 })
+
+test('model picker catalog follows connected credentials and selects an available default', async () => {
+  const headers = {
+    'x-fx0-proxy-secret': process.env.FX0_PROXY_SECRET,
+    'tailscale-user-login': 'model-picker-test@example.invalid',
+  }
+  const read = async () => {
+    const response = await listModels(new Request(`${process.env.APP_URL}/api/models`, { headers }))
+    expect(response.status).toBe(200)
+    return response.json()
+  }
+  process.env.SESSION_SECRET ??= randomUUID()
+  const previous = process.env.FX0_MODEL
+  process.env.FX0_MODEL = 'anthropic/claude-sonnet-4-5'
+  try {
+    const before = await read()
+    expect(before.models.some(model => model.startsWith('openai/'))).toBe(false)
+    await piModels.login('openai', 'api_key', {
+      signal: new AbortController().signal, notify() {},
+      prompt: async () => `credential-storage-test:${randomUUID()}`,
+    })
+    const connected = await read()
+    expect(connected.models.some(model => model.startsWith('openai/'))).toBe(true)
+    expect(connected.models.some(model => model.startsWith('anthropic/'))).toBe(false)
+    expect(connected.models).toContain(connected.defaultModel)
+    expect(connected.defaultModel).toStartWith('openai/')
+    await piModels.logout('openai')
+    const removed = await read()
+    expect(removed.models.some(model => model.startsWith('openai/'))).toBe(false)
+    expect(removed.models).toEqual(before.models)
+  } finally {
+    await piModels.logout('openai')
+    if (previous === undefined) delete process.env.FX0_MODEL
+    else process.env.FX0_MODEL = previous
+  }
+}, 30000)
 
 test('libfx conversation becomes Pi text, images, tool calls and tool results', () => {
   const model = findModel('anthropic/claude-sonnet-4-5')
