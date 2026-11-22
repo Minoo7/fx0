@@ -30,4 +30,4 @@ createServer((incoming, outgoing) => {
   })
   outgoing.on('close', () => forwarded.destroy())
   incoming.pipe(forwarded)
-}).listen(Number(process.env.FX0_PROXY_PORT ?? 8080), '127.0.0.1')
+}).listen(Number(process.env.FX0_PROXY_PORT ?? 8080), process.env.FX0_PROXY_HOST ?? '127.0.0.1')
